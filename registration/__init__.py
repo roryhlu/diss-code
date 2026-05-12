@@ -9,13 +9,13 @@ Provides:
   inverse_transform   — Fast SE(3) inverse
 """
 
-from registration.weighted_svd import (
+from registration.se3_utils import (
     compose,
     extract_rt,
     inverse_transform,
     transform_points,
-    weighted_svd_se3,
 )
+from registration.weighted_svd import weighted_svd_se3
 
 __all__ = [
     "weighted_svd_se3",

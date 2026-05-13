@@ -48,7 +48,7 @@ Durham University Level 4 Dissertation — Hybrid perception-to-control pipeline
 
 ### Module 1 — Perception
 
-**Voxel Downsampling:** Each voxel cell is collapsed to its centroid $\mathbf{p}_{\text{voxel}} = \frac{1}{N_v}\sum_{i} \mathbf{p}_i$, preserving uniform point density.
+**Voxel Downsampling:** Each voxel cell is collapsed to its centroid $\mathbf{p}_{\mathrm{voxel}} = \frac{1}{N_v}\sum_{i} \mathbf{p}_i$, preserving uniform point density.
 
 **PCA Normal Estimation:** For each point's $k=30$ nearest neighbours, the local covariance matrix $C = \frac{1}{k}\sum(\mathbf{p}_j - \boldsymbol{\mu})(\mathbf{p}_j - \boldsymbol{\mu})^\top$ is decomposed. The eigenvector of the smallest eigenvalue is the surface normal.
 
@@ -76,11 +76,11 @@ $$\max \; \varepsilon \quad \text{s.t.} \quad W\boldsymbol{\alpha} = \mathbf{0},
 
 If $\varepsilon > 0 \implies$ Force-Closure. The wrench matrix $W = [W_1 \mid W_2] \in \mathbb{R}^{6 \times 2m}$ has $2m = 16$ columns (8 friction cone generators per contact, $\mu=0.5$ for plaster).
 
-**CVaR$_5$% Filter:**
+**CVaR Filter ($\alpha=0.05$):**
 
-$$\text{CVaR}_{5\%} = \frac{1}{K}\sum_{k=1}^K \varepsilon_{(k)},\quad K = \lceil 0.05 \cdot N \rceil$$
+$$\mathrm{CVaR}_{0.05} = \frac{1}{K}\sum_{k=1}^K \varepsilon_{(k)},\quad K = \lceil 0.05 \cdot N \rceil$$
 
-Accepts a grasp only if Force-Closure holds in **all** of the worst 5% of geometric realizations (sampled from the MC Dropout epistemic variance cloud). A grasp scoring $\varepsilon=0.1$ in 95% of cases but $\varepsilon=0$ in 5% is correctly rejected with $\text{CVaR}_{5\%}=0$.
+Accepts a grasp only if Force-Closure holds in **all** of the worst 5% of geometric realizations (sampled from the MC Dropout epistemic variance cloud). A grasp scoring $\varepsilon=0.1$ in 95% of cases but $\varepsilon=0$ in 5% is correctly rejected with $\mathrm{CVaR}_{0.05}=0$.
 
 ### Module 4 — Hand-Eye Calibration
 

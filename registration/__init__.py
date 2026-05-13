@@ -3,6 +3,7 @@ Registration sub-package — SE(3) registration primitives.
 
 Provides:
   register_teaser       — TEASER++ global registration with TLS cost + SE(3) cert
+  register_scene_to_cad — Scene→CAD registration with domain-optimised presets
   weighted_svd_se3      — Optimal SE(3) via Weighted SVD (Kabsch)
   compute_fpfh          — FPFH descriptor computation
   match_features        — Feature matching with Lowe ratio test
@@ -23,13 +24,16 @@ from registration.se3_utils import (
 from registration.teaser_registration import (
     SE3Result,
     TeaserParams,
+    register_scene_to_cad,
     register_teaser,
     validate_se3,
 )
+
 from registration.weighted_svd import weighted_svd_se3
 
 __all__ = [
     "register_teaser",
+    "register_scene_to_cad",
     "SE3Result",
     "TeaserParams",
     "validate_se3",

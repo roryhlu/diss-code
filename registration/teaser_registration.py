@@ -418,6 +418,88 @@ def _solve_teaser_core(
 # ---------------------------------------------------------------------------
 
 
+def register_scene_to_cad(
+    pcd_scene: o3d.geometry.PointCloud,
+    pcd_cad: o3d.geometry.PointCloud,
+    *,
+    voxel_size: float = 0.005,
+    c_threshold: float = 0.005,
+    noise_bound: float = 0.001,
+    fpfh_radius: float = 0.035,
+) -> SE3Result:
+    r"""
+    Register a cluttered scene cloud onto a clean CAD model.
+
+    Domain-aware convenience wrapper around ``register_teaser()`` with
+    parameter presets optimised for the scene→CAD alignment problem:
+
+    - **Scene cloud** is larger, denser, noisy, with background clutter.
+      It serves as the *source* (to be transformed onto the CAD model).
+    - **CAD model** is a perfect, watertight mesh with zero sensor noise.
+      It serves as the *target* (fixed reference frame).
+
+    Parameter rationale:
+
+      ``voxel_size = 0.005``
+        Uniform downsampling ensures consistent point density between
+        scene sensor data and CAD-sampled points.
+
+      ``c_threshold = 0.005`` (5 mm)
+        Tighter than the default 10 mm because the CAD model has *no*
+        subsurface scattering. The only outliers are scene clutter points
+        that have no geometric counterpart in the CAD model. A 5 mm bound
+        rejects these while preserving true correspondence pairs.
+
+      ``noise_bound = 0.001``
+        D405 sub-mm depth accuracy at close range.
+
+      ``fpfh_radius = 0.035`` (35 mm)
+        Larger search radius for the noisy scene cloud to capture more
+        local geometric context, improving descriptor discriminability
+        against the cleaner CAD model.
+
+    The output is a mathematically certified 4×4 SE(3) transformation
+    matrix T_scene→cad that maps scene-frame points into CAD-model frame:
+
+        p_cad = T_scene→cad · p_scene   for  p ∈ ℝ³
+
+    Under the hood this calls TEASER++ with the GNC-TLS solver, producing
+    a certifiable global optimum (if ``teaserpp_python`` is installed),
+    or falls back to Open3D RANSAC with an explicit warning.
+
+    Args:
+        pcd_scene:   Scene point cloud (source — moving).
+        pcd_cad:     CAD model point cloud (target — fixed).
+        voxel_size:  Voxel downsampling size in metres.
+        c_threshold: TLS truncation threshold in metres.
+        noise_bound: Sensor noise bound in metres.
+        fpfh_radius: FPFH search radius in metres.
+
+    Returns:
+        SE3Result with 4×4 SE(3) transformation and optimality certificate.
+
+    Raises:
+        ValueError: If the output matrix fails SE(3) validation.
+        RuntimeError: If fewer than 3 correspondences are found.
+    """
+    # Voxel downsample both clouds for uniform density
+    if voxel_size > 0:
+        pcd_scene = pcd_scene.voxel_down_sample(voxel_size=voxel_size)
+        pcd_cad = pcd_cad.voxel_down_sample(voxel_size=voxel_size)
+
+    params = TeaserParams(
+        c_threshold=c_threshold,
+        noise_bound=noise_bound,
+        fpfh_radius=fpfh_radius,
+        # CAD model has no scattering — tighter ratio test is safe
+        ratio_threshold=0.95,
+        # Scene to CAD may benefit from more correspondences
+        max_correspondences=8000,
+    )
+
+    return register_teaser(pcd_scene, pcd_cad, params)
+
+
 def _solve_ransac_fallback(
     pcd_src: o3d.geometry.PointCloud,
     pcd_tgt: o3d.geometry.PointCloud,

@@ -424,6 +424,28 @@ class GeoTransformer(nn.Module):
 
         return output
 
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Extract bottleneck features for registration descriptor matching.
+
+        Returns the post-bottleneck feature vectors (before the decoder),
+        so each MC Dropout sample produces a different set of features.
+        These can be used as learned descriptors for TEASER++ correspondence
+        matching in place of FPFH.
+
+        Args:
+            x: Input point cloud, shape (N, 6) — [x,y,z, nx,ny,nz].
+
+        Returns:
+            Feature descriptors, shape (N, embed_dim).
+        """
+        positions = x[:, :3]
+        features = self.encoder(x)
+        features = features + self.pos_encoding(positions)
+        features = self.transformer(features, positions)
+        features = self.bottleneck(features)
+        return features
+
     def set_mc_mode(self, enabled: bool):
         """Enable/disable MC Dropout for stochastic inference."""
         self.bottleneck.set_mc_mode(enabled)

@@ -19,9 +19,68 @@ Truncated Least Squares (TEASER++):
 === TEASER++ Solver Stages ===
 
   Stage 1 — Maximum Clique Inlier Selection (MCE)
-    Build consistency graph where edge (i,j) exists iff
-        | ||q_i - q_j|| - ||p_i - p_j|| | ≤ 2·noise_bound
-    Find largest clique = mutually consistent inlier set.
+    ─────────────────────────────────────────────────────────────────
+
+    Core Invariance Principle:
+      Rigid transformations (T ∈ SE(3)) preserve Euclidean distances:
+        ‖q_i − q_j‖ = ‖(R p_i + t) − (R p_j + t)‖ = ‖R(p_i − p_j)‖ = ‖p_i − p_j‖
+      because R ∈ SO(3) is orthonormal and t cancels out.
+
+    This yields a measurement-independent invariant: the pairwise
+    distance between any two points in the source cloud MUST equal
+    the pairwise distance between their true correspondents in the
+    target cloud, regardless of the unknown SE(3) transform.
+
+    Constraint Formulation:
+      Let  (p_i, q_i)  and  (p_j, q_j)  be two hypothetical correspondences.
+      Their distance residual is:
+          d_ij = | ‖q_i − q_j‖ − ‖p_i − p_j‖ |
+
+      If both correspondences are true inliers, then:
+          d_ij ≤ 2 · ε       (ε = noise_bound)
+
+      The factor of 2 arises from the worst-case sum of two independent
+      measurement errors (one at each point).  Each point measurement is
+      bounded by ε, so the pairwise distance error is bounded by 2ε.
+
+    Graph Construction:
+      Build an undirected consistency graph  G = (V, E)  where:
+        • Vertices  V = {1, 2, …, N}  — one per correspondence.
+        • Edge  (i, j) ∈ E  ⇔  d_ij ≤ 2ε.
+          (the two correspondences are mutually consistent)
+
+      In an edge-connected pair, it is *possible* that both
+      correspondences are inliers.  If no edge exists, at least one
+      of the two must be an outlier — because true inliers would
+      always satisfy the pairwise distance invariant.
+
+    Maximum Clique Problem:
+      A clique  C ⊆ V  is a set of mutually connected vertices
+      (∀ i,j ∈ C, (i,j) ∈ E).  The largest clique represents the
+      maximum set of correspondences that are pairwise consistent
+      — and therefore, with high probability, the true inlier set.
+
+      Formally:
+          C* = arg max{ |C| : C ⊆ V,  ∀ i,j ∈ C,  d_ij ≤ 2ε }
+
+      This is the *Maximum Clique* (MC) problem on graph G.
+      MC is NP-hard in general, but the TEASER++ consistency graph
+      is sparse (outliers are randomly distributed) — solvable via
+      heuristic branch-and-bound with core pruning.
+
+    Why This Eliminates Subsurface Scattering Outliers:
+      Subsurface scattering on porous plaster produces correspondences
+      where one point lies on the true surface and its putative match
+      lies *inside* the fragment volume (1–3 mm penetration artifact).
+      Such pairs violate the distance invariant against every true
+      inlier and against each other — they form isolated vertices
+      with very low degree in G.  The maximum clique naturally
+      discards them without requiring any parametric noise model.
+
+    Output:
+      The largest clique  C*  is extracted and passed to Stage 2
+      as a pruned, high-confidence inlier set — robust to ≥99%
+      outliers in the correspondence pool.
 
   Stage 2 — Decoupled Rotation (GNC-TLS)
     Graduated Non-Convexity with TLS clamping:

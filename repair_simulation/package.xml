@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd"
+            schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>repair_simulation</name>
+  <version>0.1.0</version>
+  <description>
+    RePAIR simulation package for MoveIt2-based robotic grasp execution.
+    Takes top-ranked CVaR grasps from the perception pipeline, transforms
+    them via hand-eye calibration into the Wlkata Mirobot base frame, and
+    commands the arm to perform a top-down approach-and-grasp trajectory.
+  </description>
+
+  <maintainer email="rory.hlustik@outlook.com">Rory Hlustik</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+
+  <!-- MoveIt2 core -->
+  <depend>moveit_core</depend>
+  <depend>moveit_ros_planning_interface</depend>
+  <depend>moveit_ros_move_group</depend>
+
+  <!-- ROS2 core -->
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+
+  <!-- Hardware interfaces -->
+  <depend>control_msgs</depend>
+  <depend>trajectory_msgs</depend>
+
+  <!-- Numeric -->
+  <depend>python3-numpy</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

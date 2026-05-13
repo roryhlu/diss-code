@@ -37,6 +37,51 @@ Grasp Quality (epsilon metric):
   Largest ball around origin fully contained in the GWS.  Used as
   the cost-to-reject in the CVaR filter (see AGENTS.md §3).
 
+=== CVaR Filter — Rejecting Grasps on the Worst 5% of Shape Variations ===
+
+In the RePAIR pipeline, archaeological fragments have geometric uncertainty
+from occluded regions, erosive wear, and sensor depth noise.  Monte Carlo
+Dropout on the GeoTransformer produces N structural hypotheses (point cloud
+variations), each a plausible realisation of the fragment's hidden geometry.
+
+For each grasp candidate (a pair of contact points + approach vector), we
+compute force-closure on every structural hypothesis and obtain a quality
+metric εₖ for k = 1 … N.  A naïve approach would accept the grasp if its
+*average* ε exceeds some threshold — but this ignores tail risk.
+
+Conditional Value-at-Risk at level α (CVaR_α):
+    Let ξ₁ ≤ ξ₂ ≤ … ≤ ξ_N  be the ordered negative quality scores
+    (−εₖ, so higher = worse).  Set K = ⌈α·N⌉ (worst α-proportion).
+
+    VaR_α = ξ_K
+    CVaR_α = (1/K) · Σ_{k=1}^{K} ξ_k
+
+    CVaR_α(ε) = —CVaR_α(−ε)
+              = (1 / ⌈α·N⌉) · Σ_{k=1}^{⌈α·N⌉} ε_{(k)}   (worst α-fraction)
+
+where ε_{(1)} ≤ ε_{(2)} ≤ … ≤ ε_{(N)} are the sorted quality scores.
+
+Intuition:
+    CVaR₅% gives the *mean* epsilon over the worst 5% of geometric
+    variations — not the median, not the 95th percentile, but the tail
+    average.  A grasp that scores ε = 0.1 in 95% of cases but ε = 0.0
+    in the other 5% has CVaR₅% = 0.0 and is REJECTED.  This guarantees
+    robustness against the most dangerous hidden geometries (porous
+    cavities, fracture lines, thin-walled regions) before the manipulator
+    ever applies force.
+
+Rejection rule:
+    ACCEPT  ⇔  CVaR_{5%}(ε₁, …, ε_N) > 0
+    REJECT otherwise.
+
+    Equivalently: all ε_{(k)} for the worst ⌈0.05·N⌉ structural
+    hypotheses must be strictly positive — the grasp must maintain
+    force-closure even in the 5% most adverse shape configurations.
+
+This epsilon is pre-computed by the LP in test_force_closure_lp() as
+the radius of the largest ball around 0 in the GWS, making it directly
+comparable across grasps and structural hypotheses.
+
 Usage:
     python scripts/force_closure.py fragment.stl \\
         --contact1 0.023 -0.015 0.041 \\

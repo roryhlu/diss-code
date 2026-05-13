@@ -20,24 +20,111 @@ For each of up to 15 grasp candidates:
 Rank accepted candidates by CVaR value (higher = safer).
 Return only the top 5 satisfying candidates.
 
-=== Minkowski Sum GWS ===
+=== Minkowski Sum GWS — Full Derivation ===
+────────────────────────────────────────
 
-The Grasp Wrench Space for a two-finger polyhedral friction cone grasp
-is the convex hull of the Minkowski sum of individual contact wrench cones:
+Step 1 — Individual Contact Wrench Cone:
 
-    W = conv{ w_{1,j} + w_{2,k} : j,k = 1..m }  in R^6
+Each contact i (i = 1, 2) at position c_i ∈ R³ has a Coulomb friction cone
+C_i approximated by m polyhedral generators {f_{i,1}, ..., f_{i,m}} ⊂ R³:
 
-where w_{i,j} = [f_{i,j} ; c_i x f_{i,j}] and f_{i,j} are the m generators
-of the Coulomb friction cone at contact i.
+    C_i ≈ cone{f_{i,1}, ..., f_{i,m}} = { Σ_j α_{i,j} f_{i,j} : α_{i,j} ≥ 0 }
 
-Force-closure: 0 in int(W) iff exists alpha_{i,j} > 0 s.t. sum W_i alpha_i = 0.
+Each generator produces a wrench in R^6 by stacking the 3-D force and the
+3-D torque (cross product of position and force):
 
-=== CVaR at 5% - Why It Is Safer Than Expected-Value Planning ===
+    w_{i,j} = [ f_{i,j}  ;  c_i × f_{i,j} ]  ∈ R^6
 
-A mean-filter would accept a grasp with epsilon = 0.1 in 95% of realizations
-but epsilon = 0 in 5%. CVaR_{5%} correctly rejects it at CVaR_{5%} = 0.
-This protects against fracture-edge geometries where the fragment
-can shatter under grasping force on the worst-5% of hidden variations.
+The contact wrench cone W_i is the conical hull of its m wrench generators:
+
+    W_i = cone{w_{i,1}, ..., w_{i,m}} ⊂ R^6
+
+Step 2 — Minkowski Sum of Contact Cones:
+
+The Grasp Wrench Space (GWS) is the Minkowski sum (⊕) of the two
+contact wrench cones:
+
+    W = W_1 ⊕ W_2
+      = { w_1 + w_2 : w_1 ∈ W_1,  w_2 ∈ W_2 }
+
+This captures the set of ALL net wrenches the two fingers can jointly
+apply — every combination of a valid force from finger 1 and a valid
+force from finger 2.
+
+Step 3 — Convex Hull of Pairwise Generator Sums:
+
+For polyhedral cones, the Minkowski sum reduces to the convex hull of
+all pairwise sums of the m generators from each cone:
+
+    W = conv{ w_{1,j} + w_{2,k} : j, k = 1 … m }  ⊂ R^6
+
+This produces m² = 64 vertices in R^6 for m = 8 generators.
+
+Step 4 — Why the LP Doesn't Need Explicit Minkowski Vertices:
+
+The force-closure LP works directly with the COMBINED wrench matrix:
+
+    W_combined = [W_1 | W_2] ∈ R^{6 × 2m}
+
+This 6 × 16 matrix has the 2m = 16 individual generators as columns
+(8 from each contact).  The LP:
+
+    max ε  s.t.  W_combined · α = 0,  1ᵀα = 1,  α_j ≥ ε
+
+tests whether the origin is in the strict interior of conv(columns of
+W_combined).  This is mathematically equivalent to testing whether
+0 ∈ int(conv{pointwise Minkowski sums}) — but without ever constructing
+the m² = 64 explicit Minkowski vertices.  This is why the LP has only
+2m = 16 variables, not m² = 64.
+
+Geometric intuition: a non-negative combination of the 16 wrench columns
+that sums to zero means the convex hull of those columns contains the
+origin.  The ε margin ensures strict interiority.
+
+Force-closure:  0 ∈ int(W)  ⇔  ∃ α_j > 0 s.t.  Σ_j α_j · col_j(W_combined) = 0.
+
+=== CVaR at 5% — Why It Is Safer Than Expected-Value Planning ===
+──────────────────────────────────────────────────────────────
+
+Archaeological plaster fragments present a unique challenge: subsurface
+scattering, erosive wear, and hidden fracture lines mean the true 3D
+geometry is fundamentally uncertain.  The MC Dropout variance cloud
+quantifies this uncertainty as per-point epistemic variance σ²_i.
+
+Consider a grasp with these hypothetical scores across N = 100 geometric
+realizations (95 good, 5 catastrophic):
+
+    ε_values = [0.10, 0.10, ..., 0.10 (95×),  0.00, 0.00, 0.00, 0.00, 0.00 (5×)]
+
+Expected-value planning (mean filter):
+    ε_bar = (95 × 0.10 + 5 × 0.00) / 100 = 0.095  →  "Looks safe! Accept."
+
+CVaR_{5%} filter:
+    K = ⌈0.05 × 100⌉ = 5
+    CVaR_{5%} = (0.00 + 0.00 + 0.00 + 0.00 + 0.00) / 5 = 0.000  →  REJECT.
+
+WHY THE MEAN FILTER IS DANGEROUS:
+The 5 failed realizations correspond to the hidden fracture geometries
+where the contact point's local surface normal shifts enough to break
+the antipodal condition.  On a real fragment, this means the gripper
+applies force at an angle that slides off the surface — the fragment
+rotates, collides with the table, and shatters.  The mean filter sees
+"95% success rate" and authorizes the grasp.  CVaR sees "0% margin in
+the worst 5%" and blocks it.
+
+WHY THIS MATTERS SPECIFICALLY FOR ARCHAEOLOGICAL FRAGMENTS:
+  1. Irreplaceable artifacts — a single shattered fragment destroys
+     irrecoverable historical data.
+  2. Non-Gaussian failure modes — fracture edges don't degrade gradually;
+     they exhibit a cliff-edge: either the contact holds or it doesn't.
+     Mean-based metrics smooth out this discontinuity; CVaR preserves it.
+  3. Small-sample epistemic uncertainty — we have only one partial scan
+     per fragment.  The variance cloud represents the model's own
+     uncertainty about hidden geometry, not statistical noise.
+  4. The CVaR rejection threshold (ε > 0) is intentionally strict: any
+     grasp that loses force-closure in ANY of the worst-5% realizations
+     is rejected, even if 95% succeed.  This is the appropriate risk
+     posture for gripping a 2,000-year-old plaster fragment.
 
 === Usage ===
 

@@ -2,10 +2,11 @@
 Registration sub-package — SE(3) registration primitives.
 
 Provides:
+  register_teaser       — TEASER++ global registration with TLS cost + SE(3) cert
   weighted_svd_se3      — Optimal SE(3) via Weighted SVD (Kabsch)
-  register_teaser       — TEASER++ global registration with TLS cost
   compute_fpfh          — FPFH descriptor computation
   match_features        — Feature matching with Lowe ratio test
+  validate_se3          — Verify SO(3) orthogonality + det(R)=+1
   transform_points      — Apply SE(3) transform to point clouds
   extract_rt            — Split SE(3) into R, t
   compose               — Compose two SE(3) transforms
@@ -19,13 +20,20 @@ from registration.se3_utils import (
     inverse_transform,
     transform_points,
 )
-from registration.teaser_registration import TeaserParams, register_teaser
+from registration.teaser_registration import (
+    SE3Result,
+    TeaserParams,
+    register_teaser,
+    validate_se3,
+)
 from registration.weighted_svd import weighted_svd_se3
 
 __all__ = [
-    "weighted_svd_se3",
     "register_teaser",
+    "SE3Result",
     "TeaserParams",
+    "validate_se3",
+    "weighted_svd_se3",
     "compute_fpfh",
     "match_features",
     "transform_points",

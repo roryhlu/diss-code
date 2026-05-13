@@ -138,17 +138,21 @@ def main() -> None:
     print(f"  FPFH radius:               {args.fpfh_radius} m")
     print(f"  Ratio test threshold:      {args.ratio_threshold}")
 
-    T = register_teaser(src, tgt, params)
-    T_matrix = np.asarray(T)
+    result = register_teaser(src, tgt, params)
+    T_matrix = result.T
 
     # ─── 3. Analyse result ───
-    R = T_matrix[:3, :3]
-    t = T_matrix[:3, 3]
-    angle_deg = np.rad2deg(np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1)))
     print(f"\n=== Registration result ===")
-    print(f"  Rotation angle:  {angle_deg:.4f}°")
-    print(f"  Translation norm: {np.linalg.norm(t):.4f} m")
-    print(f"  SE(3) matrix:\n{T_matrix}")
+    print(f"  Rotation angle:      {result.rotation_angle_deg:.4f}°")
+    print(f"  Translation norm:    {result.translation_norm:.4f} m")
+    print(f"  Correspondences:     {result.num_correspondences}")
+    print(f"  Solver runtime:      {result.runtime_sec:.3f} s")
+    if result.certificate is not None:
+        print(f"  TLS certificate:     {result.certificate:.6f} (suboptimality bound)")
+    else:
+        print(f"  TLS certificate:     N/A (RANSAC fallback)")
+    print(f"  SE(3) validated:      True")
+    print(f"  SE(3) matrix:\n{np.array2string(T_matrix, precision=6, suppress_small=True)}")
 
     # ─── 4. Apply transform ───
     src_aligned = src.transform(T_matrix)

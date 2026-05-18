@@ -76,7 +76,7 @@ def fpfh_to_rgb(fpfh: o3d.pipelines.registration.Feature) -> np.ndarray:
     Returns:
         colours: (N, 3) numpy array in [0, 1] RGB format.
     """
-    F = np.asarray(fpfh.data, dtype=np.float64)  # (N, 33)
+    F = np.asarray(fpfh.data, dtype=np.float64).T  # (N, 33)
 
     if F.shape[0] < 3:
         raise ValueError(f"Only {F.shape[0]} points — need ≥ 3 for PCA.")
@@ -102,7 +102,7 @@ def fpfh_to_rgb(fpfh: o3d.pipelines.registration.Feature) -> np.ndarray:
 
 def print_descriptor_stats(fpfh: o3d.pipelines.registration.Feature) -> None:
     """Print summary statistics of the FPFH descriptor matrix."""
-    F = np.asarray(fpfh.data, dtype=np.float64)
+    F = np.asarray(fpfh.data, dtype=np.float64).T
     print(f"\n  === FPFH Descriptor Statistics ===")
     print(f"  Shape:       {F.shape[0]:,} points × {F.shape[1]} bins")
     print(f"  Mean:        {F.mean():.6f}")

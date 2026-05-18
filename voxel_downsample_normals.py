@@ -9,13 +9,24 @@ import argparse
 
 import numpy as np
 import open3d as o3d
-
-
-def load_point_cloud(file_path: str) -> o3d.geometry.PointCloud:
-    """Load point cloud from file (PLY, PCD, XYZ, OBJ, STL)."""
+def load_point_cloud(file_path):
+    # Try loading as a standard point cloud first
     pcd = o3d.io.read_point_cloud(file_path)
+    
+    # If it's an OBJ mesh, read_point_cloud will return 0 points
     if not pcd.has_points():
-        raise ValueError(f"No points found in '{file_path}'")
+        print(f"Detected mesh format or empty file. Attempting to load as mesh...")
+        mesh = o3d.io.read_triangle_mesh(file_path)
+        if mesh.has_triangles():
+            # Convert mesh vertices directly to a point cloud
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = mesh.vertices
+            # If the mesh has vertex colors, carry them over
+            if mesh.has_vertex_colors():
+                pcd.colors = mesh.vertex_colors
+        else:
+            raise ValueError(f"No points or triangles found in '{file_path}'")
+            
     return pcd
 
 

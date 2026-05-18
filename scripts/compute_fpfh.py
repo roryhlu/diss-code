@@ -236,7 +236,7 @@ def main() -> None:
     colours = fpfh_to_rgb(fpfh)
     explained_var = None
     if colours.size:
-        F = np.asarray(fpfh.data, dtype=np.float64)
+        F = np.asarray(fpfh.data, dtype=np.float64).T
         F_centred = F - F.mean(axis=0)
         C = (F_centred.T @ F_centred) / (F.shape[0] - 1)
         eigvals = np.linalg.eigvalsh(C)

@@ -119,6 +119,24 @@ from registration.fpfh_features import (
 # TEASER++ Python binding (optional dependency)
 # ---------------------------------------------------------------------------
 
+import os as _os
+import sys as _sys
+
+# MinGW runtime DLLs must be discoverable on Windows before importing
+if _sys.platform == "win32":
+    _mingw_paths = [
+        r"C:\msys64\mingw64\bin",
+        r"C:\mingw64\bin",
+    ]
+    # also scan PATH for mingw64 entries
+    for _entry in _os.environ.get("PATH", "").split(";"):
+        _lower = _entry.lower()
+        if "mingw" in _lower and _lower.endswith("bin"):
+            _mingw_paths.append(_entry)
+    for _p in _mingw_paths:
+        if _os.path.isdir(_p):
+            _os.add_dll_directory(_p)
+
 try:
     import teaserpp_python  # noqa: F401
 

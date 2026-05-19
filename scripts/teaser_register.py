@@ -64,6 +64,12 @@ def parse_args() -> argparse.Namespace:
         help="Expected sensor noise (metres, default: 0.001)",
     )
     p.add_argument(
+        "--normal-radius",
+        type=float,
+        default=None,
+        help="Normal estimation radius (default: 2x voxel-size)",
+    )
+    p.add_argument(
         "--fpfh-radius",
         type=float,
         default=0.025,
@@ -125,17 +131,20 @@ def main() -> None:
     tgt = load_and_preprocess(args.target, args.voxel_size)
 
     # ─── 2. TEASER++ registration ───
+    normal_radius = args.normal_radius if args.normal_radius is not None else args.voxel_size * 2
     params = TeaserParams(
         c_threshold=args.c_threshold,
         noise_bound=args.noise_bound,
         fpfh_radius=args.fpfh_radius,
         ratio_threshold=args.ratio_threshold,
+        normal_radius=normal_radius,
     )
 
     print(f"\n=== Running TEASER++ registration ===")
     print(f"  TLS truncation threshold:  c = {args.c_threshold:.4f} m")
     print(f"  TLS penalty bound:         c² = {args.c_threshold**2:.2e}")
     print(f"  FPFH radius:               {args.fpfh_radius} m")
+    print(f"  Normal radius:             {normal_radius} m")
     print(f"  Ratio test threshold:      {args.ratio_threshold}")
 
     result = register_teaser(src, tgt, params)

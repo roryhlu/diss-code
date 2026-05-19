@@ -141,8 +141,8 @@ def _build_correspondence_set(
     ratio_threshold: float,
 ) -> np.ndarray:
     """Core nearest-neighbour matching with ratio test and mutual filter."""
-    src_data = np.asarray(fpfh_src.data).astype(np.float64)
-    tgt_data = np.asarray(fpfh_tgt.data).astype(np.float64)
+    src_data = np.asarray(fpfh_src.data).T.astype(np.float64)
+    tgt_data = np.asarray(fpfh_tgt.data).T.astype(np.float64)
 
     # forward: src -> tgt
     fwd_indices, fwd_dists = _knn_search(src_data, tgt_data, k=2)
@@ -199,8 +199,8 @@ def _match_distances(
     correspondences: np.ndarray,
 ) -> np.ndarray:
     """Compute Euclidean distance in FPFH space for each correspondence."""
-    src_data = np.asarray(fpfh_src.data).astype(np.float64)
-    tgt_data = np.asarray(fpfh_tgt.data).astype(np.float64)
+    src_data = np.asarray(fpfh_src.data).T.astype(np.float64)
+    tgt_data = np.asarray(fpfh_tgt.data).T.astype(np.float64)
     return np.linalg.norm(
         src_data[correspondences[:, 0]] - tgt_data[correspondences[:, 1]],
         axis=1,

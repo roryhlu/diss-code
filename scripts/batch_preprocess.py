@@ -45,9 +45,8 @@ def estimate_normals(
     """
     Estimate surface normals via PCA on k-nearest neighbours.
 
-    For each point, builds the 3×3 local covariance matrix over its
-    k neighbours and extracts the eigenvector of the smallest
-    eigenvalue (direction of least variance = surface normal).
+    Uses vectorised covariance computation and batched eigendecomposition
+    for speed — processes all N points in a single tensor operation.
 
     Normals are oriented such that the z-component of the mean-centred
     normal is positive (consistent with Open3D convention).
@@ -59,19 +58,32 @@ def estimate_normals(
     Returns:
         (N, 3) float64 unit normal vectors.
     """
+    n_pts = len(points)
+    k_eff = min(k, n_pts)
     tree = cKDTree(points)
-    _, idx = tree.query(points, k=min(k, len(points)))
+    _, idx = tree.query(points, k=k_eff)
+    neighbours = points[idx]  # (N, k, 3)
+
+    # Vectorised covariance: C_i = (1/(k-1)) * Σ (p_ij − μ_i)(p_ij − μ_i)^T
+    mu = neighbours.mean(axis=1, keepdims=True)  # (N, 1, 3)
+    centred = neighbours - mu                     # (N, k, 3)
+    cov = np.einsum("nki,nkj->nij", centred, centred) / (k_eff - 1)  # (N, 3, 3)
+
+    # Batched eigendecomposition
+    eigvals, eigvecs = np.linalg.eigh(cov)  # eigvecs[:, :, 0] = smallest eval
+
     centroid = points.mean(axis=0)
-    normals = np.empty((len(points), 3), dtype=np.float64)
-    for i in range(len(points)):
-        neighbours = points[idx[i]]
-        cov = np.cov(neighbours.T, bias=False)
-        _, eigvecs = np.linalg.eigh(cov)
-        n = eigvecs[:, 0]  # smallest eigenvalue → normal
-        # Orient consistently relative to centroid
-        if np.dot(n, points[i] - centroid) < 0:
-            n = -n
-        normals[i] = n
+    normals = eigvecs[:, :, 0].copy()  # (N, 3) — smallest eigenvalue direction
+
+    # Orient consistently relative to centroid
+    dot = np.sum(normals * (points - centroid), axis=1)
+    normals[dot < 0] *= -1.0
+
+    # Normalise (already unit from eigh, but ensure numerically)
+    norms = np.linalg.norm(normals, axis=1, keepdims=True)
+    norms[norms < 1e-12] = 1.0
+    normals /= norms
+
     return normals
 
 
@@ -83,33 +95,33 @@ def voxel_downsample(
     voxel_size: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Uniform voxel-grid downsampling.
+    Uniform voxel-grid downsampling via vectorised accumulation.
 
-    Partitions space into cubes of edge `voxel_size` and replaces all
-    points inside each cube with their centroid.  Returns downsampled
-    positions and per-voxel indices for later normal transfer.
-
-    Args:
-        points:     (N, 3) float64 points.
-        voxel_size: Edge length of each voxel in metres.
-
-    Returns:
-        (downsampled_points, voxel_indices) — both float64.
+    Returns (downsampled_points, voxel_ids) — each voxel cell is
+    collapsed to its centroid.
     """
     if voxel_size <= 0 or len(points) < 2:
         return points.copy(), np.arange(len(points), dtype=np.int64)
 
     min_pt = points.min(axis=0)
     voxel_idx = np.floor((points - min_pt) / voxel_size).astype(np.int64)
-    # Unique voxel identifier
-    scale = int(np.ceil(np.max(voxel_idx) - np.min(voxel_idx)) + 1)
-    ids = voxel_idx[:, 0] * scale * scale + voxel_idx[:, 1] * scale + voxel_idx[:, 2]
+    # Unique voxel identifier (1D flatten)
+    span = voxel_idx.max(axis=0) - voxel_idx.min(axis=0) + 1
+    ids = (
+        voxel_idx[:, 0] * span[1] * span[2]
+        + voxel_idx[:, 1] * span[2]
+        + voxel_idx[:, 2]
+    )
+    # Remap to dense 0..n_voxels-1
     unique_ids, inverse = np.unique(ids, return_inverse=True)
+    n_voxels = len(unique_ids)
 
-    down = np.empty((len(unique_ids), 3), dtype=np.float64)
-    for i in range(len(unique_ids)):
-        mask = inverse == i
-        down[i] = points[mask].mean(axis=0)
+    # Vectorised accumulation
+    down = np.zeros((n_voxels, 3), dtype=np.float64)
+    np.add.at(down, inverse, points)
+    counts = np.bincount(inverse, minlength=n_voxels).astype(np.float64)
+    counts = np.maximum(counts, 1.0)
+    down /= counts[:, None]
 
     return down, inverse
 
@@ -214,6 +226,9 @@ def read_fragment(path: str) -> np.ndarray:
     """
     Read a fragment from OBJ, PLY, or PCD file.
 
+    OBJ files: fast line-by-line vertex extraction (no mesh processing).
+    PLY/PCD files: native binary reader.
+
     Returns (N, 3) float64 point positions.
     """
     ext = Path(path).suffix.lower()
@@ -230,11 +245,11 @@ def read_fragment(path: str) -> np.ndarray:
 
 
 def save_ply(path: str, points: np.ndarray, normals: np.ndarray) -> None:
-    """Write ASCII PLY with x,y,z,nx,ny,nz in double precision."""
+    """Write binary PLY with x,y,z,nx,ny,nz in double precision."""
     n = len(points)
     header = (
         "ply\n"
-        "format ascii 1.0\n"
+        "format binary_little_endian 1.0\n"
         f"comment Created by batch_preprocess.py\n"
         f"element vertex {n}\n"
         "property double x\n"
@@ -245,13 +260,10 @@ def save_ply(path: str, points: np.ndarray, normals: np.ndarray) -> None:
         "property double nz\n"
         "end_header\n"
     )
-    with open(path, "w") as f:
-        f.write(header)
-        for i in range(n):
-            f.write(
-                f"{points[i,0]:.8f} {points[i,1]:.8f} {points[i,2]:.8f} "
-                f"{normals[i,0]:.8f} {normals[i,1]:.8f} {normals[i,2]:.8f}\n"
-            )
+    data = np.column_stack([points, normals]).astype(np.float64)
+    with open(path, "wb") as f:
+        f.write(header.encode("ascii"))
+        f.write(data.tobytes())
 
 
 # ── Main processing logic ───────────────────────────────────────────
@@ -292,13 +304,13 @@ def process_fragment(
 
 
 def find_fragment_paths(entries: list[str]) -> list[Path]:
-    """Resolve CLI entries to a flat list of fragment files."""
+    """Resolve CLI entries to a flat list of fragment files (recursive)."""
     paths: list[Path] = []
     for entry in entries:
         p = Path(entry)
         if p.is_dir():
             for ext in ("*.obj", "*.ply", "*.pcd"):
-                paths.extend(sorted(p.glob(ext)))
+                paths.extend(sorted(p.rglob(ext)))
         elif p.is_file():
             paths.append(p)
         else:

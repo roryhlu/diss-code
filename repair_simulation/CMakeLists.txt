@@ -17,6 +17,7 @@ install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 install(PROGRAMS
   repair_simulation/grasp_executor.py
   repair_simulation/camera_capture.py
+  repair_simulation/perception_bridge.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

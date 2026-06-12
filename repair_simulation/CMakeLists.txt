@@ -10,12 +10,13 @@ ament_python_install_package(${PROJECT_NAME}
   PACKAGE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/repair_simulation"
 )
 
-# Install ROS2 launch files (if added later)
-# install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+# Install ROS2 launch files
+install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
 # Install Python scripts as ROS2 nodes
 install(PROGRAMS
   repair_simulation/grasp_executor.py
+  repair_simulation/camera_capture.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

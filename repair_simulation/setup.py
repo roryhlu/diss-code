@@ -12,6 +12,7 @@ setup(
         ("share/ament_index/resource_index/packages",
          ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
+        ("share/" + package_name, ["launch/camera_pipeline.launch.py"]),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -22,6 +23,7 @@ setup(
     entry_points={
         "console_scripts": [
             "grasp_executor = repair_simulation.grasp_executor:main",
+            "camera_capture = repair_simulation.camera_capture:main",
         ],
     },
 )

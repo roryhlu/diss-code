@@ -108,6 +108,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import open3d as o3d
+from scipy.spatial import cKDTree
 
 from registration.fpfh_features import (
     compute_fpfh,
@@ -333,6 +334,30 @@ def rotation_angle_degrees(R: np.ndarray) -> float:
 # ---------------------------------------------------------------------------
 
 
+def _estimate_cloud_unit(pcd: o3d.geometry.PointCloud) -> float:
+    """
+    Estimate the characteristic inter-point spacing of a point cloud.
+
+    Computes the median nearest-neighbour distance, which provides a
+    unit-invariant measure of cloud density regardless of the coordinate
+    system (metres, millimetres, arbitrary photogrammetry frames).
+
+    Returns 1.0 as a safe fallback for degenerate inputs.
+    """
+    pts = np.asarray(pcd.points).astype(np.float64)
+    if len(pts) < 2:
+        return 1.0
+    tree = cKDTree(pts)
+    dists, _ = tree.query(pts, k=min(3, len(pts)))
+    # skip self-match (distance 0), take 2nd neighbour
+    if dists.shape[1] >= 2:
+        nn_dists = dists[:, 1]
+    else:
+        nn_dists = dists[:, 0]
+    med = float(np.median(nn_dists[nn_dists > 0]))
+    return max(med, 1e-8)
+
+
 def register_teaser(
     pcd_src: o3d.geometry.PointCloud,
     pcd_tgt: o3d.geometry.PointCloud,
@@ -349,6 +374,12 @@ def register_teaser(
          b) Open3D RANSAC + FPFH (L2 cost, approximate) — fallback.
       4. Validate SE(3) properties of the output.
 
+    If params.fpfh_radius, params.normal_radius, params.c_threshold or
+    params.noise_bound are too small for the actual point cloud density
+    (i.e., zero neighbours at the given radius), they are automatically
+    scaled up to be at least a minimum factor of the median inter-point
+    spacing.  This makes the pipeline unit-invariant.
+
     Args:
         pcd_src: Source point cloud.
         pcd_tgt: Target point cloud.
@@ -363,20 +394,27 @@ def register_teaser(
     if params is None:
         params = TeaserParams()
 
+    # ── Auto-scale radii to actual cloud density ──
+    unit = max(_estimate_cloud_unit(pcd_src), _estimate_cloud_unit(pcd_tgt))
+    params.c_threshold = max(params.c_threshold, unit * 3.0)
+    params.noise_bound = max(params.noise_bound, unit * 2.0)
+    auto_normal_radius = max(params.normal_radius, unit * 5.0)
+    auto_fpfh_radius = max(params.fpfh_radius, unit * 15.0)
+
     t_start = time.perf_counter()
 
     # ── 1. FPFH descriptors ──
     fpfh_src = compute_fpfh(
         pcd_src,
-        normal_radius=params.normal_radius,
+        normal_radius=auto_normal_radius,
         normal_k=params.normal_k,
-        fpfh_radius=params.fpfh_radius,
+        fpfh_radius=auto_fpfh_radius,
     )
     fpfh_tgt = compute_fpfh(
         pcd_tgt,
-        normal_radius=params.normal_radius,
+        normal_radius=auto_normal_radius,
         normal_k=params.normal_k,
-        fpfh_radius=params.fpfh_radius,
+        fpfh_radius=auto_fpfh_radius,
     )
 
     # ── 2. Feature matching ──
@@ -475,7 +513,7 @@ def _solve_teaser_core(
     # Extract suboptimality certificate
     certificate: float | None = None
     try:
-        certificate = float(solver.getSuboptimalityBound())
+        certificate = float(solution.best_suboptimality)
     except (AttributeError, TypeError):
         pass  # Older TEASER++ versions may not expose this
 

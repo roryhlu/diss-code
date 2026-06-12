@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import numpy as np
 import open3d as o3d
+from scipy.spatial import cKDTree
 
 
 def compute_fpfh(
@@ -180,17 +181,20 @@ def _knn_search(
     k: int = 2,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Brute-force k-NN search in descriptor space.
-    For small-medium feature sets (<50k) this is faster than KD-Tree overhead.
+    k-NN search in descriptor space via scipy cKDTree.
+
+    Complexity: O((N + Q) log N) for tree construction + query,
+    vs O(Q × N) for the brute-force alternative.  Handles
+    arbitrarily large point clouds without materialising the
+    full (Q × N × F) distance tensor.
     """
-    diff = query[:, None, :] - database[None, :, :]  # (Q, D, F)
-    dists2 = np.sum(diff**2, axis=-1)                  # (Q, D)
-    idx = np.argpartition(dists2, min(k, database.shape[0] - 1), axis=-1)[:, :k]
-    k_dists = np.take_along_axis(dists2, idx, axis=-1)
-    sort_order = np.argsort(k_dists, axis=-1)
-    idx = np.take_along_axis(idx, sort_order, axis=-1)
-    k_dists = np.take_along_axis(k_dists, sort_order, axis=-1)
-    return idx, np.sqrt(k_dists)
+    k_eff = min(k, database.shape[0])
+    tree = cKDTree(database)
+    dists, idx = tree.query(query, k=k_eff)
+    if k_eff == 1:
+        dists = dists[:, np.newaxis]
+        idx = idx[:, np.newaxis]
+    return idx, dists
 
 
 def _match_distances(

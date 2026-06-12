@@ -28,6 +28,8 @@ import torch
 def compute_variance_cloud(
     mean: torch.Tensor,
     variance: torch.Tensor,
+    *,
+    clip_percentile: float = 99.0,
 ) -> o3d.geometry.PointCloud:
     """
     Build an Open3D point cloud from MC Dropout results.
@@ -38,8 +40,9 @@ def compute_variance_cloud(
       - intensity: scalar epistemic variance σ²
 
     Args:
-        mean:     (N, 3) predictive mean positions.
-        variance: (N,) per-point epistemic variance.
+        mean:            (N, 3) predictive mean positions.
+        variance:        (N,) per-point epistemic variance.
+        clip_percentile: Upper percentile for colour scaling (default 99).
 
     Returns:
         Open3D PointCloud with colours and intensity.
@@ -51,7 +54,7 @@ def compute_variance_cloud(
     pcd.points = o3d.utility.Vector3dVector(mean_np)
 
     # Colour by variance
-    colours = variance_to_rgb(var_np)
+    colours = variance_to_rgb(var_np, clip_percentile=clip_percentile)
     pcd.colors = o3d.utility.Vector3dVector(colours)
 
     # Store variance as per-point intensity (custom attribute)

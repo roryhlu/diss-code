@@ -67,16 +67,17 @@ def run_mc_passes(
         mean:     Predictive mean point cloud, shape (N, 3).
         variance: Per-point epistemic variance (scalar), shape (N,).
     """
-    # Ensure model is in MC mode
+    # Ensure model is in MC mode and eval
+    model.eval()  # BatchNorm/LayerNorm in eval, then override dropout below
     model.set_mc_mode(True)
-    model.eval()  # BatchNorm/LayerNorm in eval mode, but dropout stays on
 
     N = point_cloud.shape[0]
     point_cloud = point_cloud.to(device)
     model = model.to(device)
 
-    # Welford's accumulators
-    count = 0
+    # Welford's accumulators — count is per-pass (t = 1..T).
+    # Each point is updated exactly once per pass regardless of batching,
+    # so the pass number t gives the correct per-point observation count.
     mean = torch.zeros(N, 3, device=device, dtype=torch.float64)
     M2 = torch.zeros(N, device=device, dtype=torch.float64)
 
@@ -93,10 +94,9 @@ def run_mc_passes(
                 # Stochastic forward pass (dropout active)
                 output = model(batch)  # (B, 3)
 
-                # Welford's online update
-                count += 1
+                # Welford's online update — count = t (pass number)
                 delta = output.double() - mean[batch_start:batch_end]
-                mean[batch_start:batch_end] += delta / count
+                mean[batch_start:batch_end] += delta / t
                 delta2 = output.double() - mean[batch_start:batch_end]
                 M2[batch_start:batch_end] += (delta * delta2).sum(dim=1)
 
@@ -133,8 +133,8 @@ def run_mc_passes_batched(
         mean:     (N, 3) predictive mean.
         variance: (N,) per-point epistemic variance.
     """
-    model.set_mc_mode(True)
     model.eval()
+    model.set_mc_mode(True)
 
     N = point_cloud.shape[0]
     point_cloud = point_cloud.to(device)

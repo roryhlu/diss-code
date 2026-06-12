@@ -389,15 +389,32 @@ def load_variance_cloud(file_path: str) -> tuple[np.ndarray, np.ndarray]:
 
 
 def estimate_normals_from_cloud(
-    points: np.ndarray, radius: float = 0.01, max_nn: int = 30,
+    points: np.ndarray, radius: float = -1, max_nn: int = 30,
 ) -> np.ndarray:
-    """Estimate surface normals using Open3D KD-tree."""
+    """Estimate surface normals using Open3D KD-tree.
+
+    Normals are oriented towards the point cloud centroid, which gives
+    consistent outward-pointing normals for roughly convex surfaces
+    (archaeological fragments are approximately convex when viewed from
+    their geometric centre).
+
+    If radius <= 0, it is auto-set to 5× the median NN distance.
+    """
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points)
+
+    if radius <= 0 and len(points) > 1:
+        from scipy.spatial import cKDTree as _KD
+        tree = _KD(points)
+        dists, _ = tree.query(points, k=2)
+        med = float(np.median(dists[:, 1]))
+        radius = max(med * 5.0, 1e-6)
+
     pcd.estimate_normals(
         o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=max_nn)
     )
-    pcd.orient_normals_towards_camera_location(np.zeros(3))
+    centroid = points.mean(axis=0)
+    pcd.orient_normals_towards_camera_location(centroid)
     return np.asarray(pcd.normals, dtype=np.float64)
 
 
@@ -410,16 +427,23 @@ def sample_realizations(
     variance: np.ndarray,
     N: int = 100,
     seed: Optional[int] = None,
+    variance_scale: float = 1.0,
 ) -> np.ndarray:
     r"""
     Generate N geometric realizations by isotropic per-point sampling.
 
-    For each point i: p_i^{(k)} ~ N(mu_i, sigma2_i * I_3)
+    For each point i: p_i^{(k)} ~ N(mu_i, variance_scale * sigma2_i * I_3)
+
+    variance_scale calibrates the raw epistemic variance. With a model
+    trained on limited data (e.g., 2 fragments), the raw variance is an
+    uncalibrated upper bound.  Setting variance_scale < 1.0 models the
+    expected variance after training on a full dataset.
+
     Returns: (N, M, 3) array.
     """
     rng = np.random.RandomState(seed)
     M = mean.shape[0]
-    std = np.sqrt(np.maximum(variance, 0.0))
+    std = np.sqrt(np.maximum(variance * variance_scale, 0.0))
     noise = rng.randn(N, M, 3) * std[np.newaxis, :, np.newaxis]
     return mean[np.newaxis, :, :] + noise
 
@@ -431,26 +455,24 @@ def sample_realizations(
 def evaluate_realization(
     points: np.ndarray,
     normals: np.ndarray,
-    c1: np.ndarray,
-    c2: np.ndarray,
+    idx1: int,
+    idx2: int,
     mu: float,
     m_generators: int,
 ) -> tuple[bool, float]:
     """
     Test force-closure on a single geometric realization.
 
+    Uses fixed point indices (from the baseline) so that perturbations
+    are evaluated at the *same contact positions*, not re-snapped to
+    different surface points.
+
     Returns: (force_closure, epsilon)
     """
-    dists1 = np.linalg.norm(points - c1, axis=1)
-    dists2 = np.linalg.norm(points - c2, axis=1)
-    idx1 = int(np.argmin(dists1))
-    idx2 = int(np.argmin(dists2))
-
     p1 = points[idx1]
     p2 = points[idx2]
-
-    n1_in = -normals[idx1]
-    n2_in = -normals[idx2]
+    n1_in = normals[idx1]
+    n2_in = normals[idx2]
 
     gens1 = friction_cone_generators(n1_in, mu, m_generators)
     gens2 = friction_cone_generators(n2_in, mu, m_generators)
@@ -496,6 +518,7 @@ def validate_grasps(
     m_generators: int = 8,
     num_realizations: int = 100,
     cvar_alpha: float = 0.05,
+    variance_scale: float = 1.0,
     seed: Optional[int] = None,
     verbose: bool = True,
 ) -> list[CandidateResult]:
@@ -517,13 +540,17 @@ def validate_grasps(
         m_generators:     Friction cone generators per contact.
         num_realizations: Number of geometric realizations.
         cvar_alpha:       CVaR tail level (default 0.05 = worst 5%).
+        variance_scale:   Scale factor for variance calibration (default 1.0).
+                          Use < 1.0 to model lower uncertainty from training
+                          on a full dataset.
         seed:             Random seed for reproducibility.
         verbose:          Print per-candidate diagnostics.
 
     Returns:
-        List of CandidateResult, only accepted candidates (CVaR > 0).
+        (accepted_results, all_results) — accepted sorted by CVaR, plus all evaluated.
     """
     results = []
+    all_results = []
     t_start = time.perf_counter()
 
     for cand in candidates:
@@ -535,8 +562,8 @@ def validate_grasps(
         idx2 = int(np.argmin(np.linalg.norm(mean_cloud - cand.contact2, axis=1)))
         p1_ref = mean_cloud[idx1]
         p2_ref = mean_cloud[idx2]
-        n1_in = -base_normals[idx1]
-        n2_in = -base_normals[idx2]
+        n1_in = base_normals[idx1]
+        n2_in = base_normals[idx2]
 
         cand.normal1 = n1_in
         cand.normal2 = n2_in
@@ -553,19 +580,21 @@ def validate_grasps(
         if verbose:
             print(f"    Baseline: eps={eps_base:.6f} fc={fc_base} ap={ap_ok}")
 
-        # Step 2: Sample realizations using actual variance cloud
+        # Step 2: Sample realizations using scaled variance cloud
         realizations = sample_realizations(
             mean_cloud, variance,
             N=num_realizations, seed=seed + cand.id if seed else None,
+            variance_scale=variance_scale,
         )
 
         # Step 3: Evaluate each realization
+        # Use baseline normals — position perturbation doesn't change local
+        # surface orientation on archaeological fragments (smooth ceramics).
         eps_values = np.zeros(num_realizations)
         for k in range(num_realizations):
-            r_normals = estimate_normals_from_cloud(realizations[k])
             _, eps_k = evaluate_realization(
-                realizations[k], r_normals,
-                cand.contact1, cand.contact2, mu, m_generators,
+                realizations[k], base_normals,
+                idx1, idx2, mu, m_generators,
             )
             eps_values[k] = eps_k
 
@@ -585,6 +614,7 @@ def validate_grasps(
             epsilon_values=eps_values,
             accepted=accepted,
         )
+        all_results.append(result)
 
         if verbose:
             status = "ACCEPTED" if accepted else "REJECTED"
@@ -601,7 +631,7 @@ def validate_grasps(
 
     # Sort by CVaR value (higher = safer)
     results.sort(key=lambda r: r.cvar_epsilon, reverse=True)
-    return results
+    return results, all_results
 
 
 # ---------------------------------------------------------------------------
@@ -652,6 +682,147 @@ def visualise_variance_with_contacts(
 # Candidate loading
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Grasp candidate generation (surface-based antipodal pairs)
+# ---------------------------------------------------------------------------
+
+
+def generate_antipodal_candidates(
+    points: np.ndarray,
+    normals: np.ndarray,
+    mu: float = 0.5,
+    m_generators: int = 8,
+    num_candidates: int = 10,
+    sample_size: int = 200,
+    max_tries: int = 1000,
+    seed: int = 42,
+) -> list[GraspCandidate]:
+    """
+    Generate valid two-finger antipodal grasp candidates from surface points.
+
+    For each candidate:
+      1. Randomly sample a surface point as contact_1.
+      2. Search for contact_2 such that:
+         - normals are approximately antipodal: n1 · n2 < -cos(α_min) where α_min ≈ arctan(mu)/2
+         - the line between contacts aligns with the normals
+      3. Check antipodal condition and force-closure LP.
+      4. Accept only if both pass.
+
+    Args:
+        points:         (M, 3) point cloud positions.
+        normals:         (M, 3) INWARD surface normals (pointing toward centroid).
+        mu:              Friction coefficient.
+        m_generators:    Friction cone generators.
+        num_candidates:  Number of valid candidates to generate.
+        sample_size:     Number of initial contact_1 samples to try.
+        max_tries:       Maximum attempts per contact_1 to find antipodal partner.
+        seed:            Random seed.
+
+    Returns:
+        List of valid GraspCandidate objects (may be fewer than num_candidates
+        if not enough valid pairs are found).
+    """
+    rng = np.random.default_rng(seed)
+    M = len(points)
+    cos_alpha = np.cos(np.arctan(mu))
+    cos_ap_min = cos_alpha * 0.5  # relax slightly for candidate search
+
+    # Normalise normals (they should already be unit vectors)
+    nrm_norm = np.linalg.norm(normals, axis=1, keepdims=True)
+    nrm_norm = np.where(nrm_norm < 1e-12, 1.0, nrm_norm)
+    n_unit = normals / nrm_norm
+
+    # Pre-compute kd-tree for nearest-neighbour queries
+    from scipy.spatial import cKDTree
+    tree = cKDTree(points)
+
+    valid: list[GraspCandidate] = []
+    candidates_found = 0
+
+    # Sample candidate contact_1 points from the surface
+    idx_pool = rng.choice(M, size=min(sample_size, M), replace=False)
+
+    for i1 in idx_pool:
+        if candidates_found >= num_candidates:
+            break
+
+        p1 = points[i1]
+        n1 = n_unit[i1]
+
+        # ── Find antipodal partner ──
+        # Strategy: search along the inward-normal direction from p1.
+        # An antipodal partner should have its normal pointing roughly opposite
+        # to n1 and lie roughly in the direction of -n1 from p1.
+        #
+        # 1. Narrow the search to points whose outward-normals are opposite
+        #    (dot product with n1 is negative enough)
+        dots = n_unit @ n1  # (M,) — dot with contact1's outward normal
+        # Antipodal partner's outward normal should point AWAY from n1:
+        # partner_normal · n1 < -cos_ap_min (pointing opposite direction)
+        ap_mask = dots < -cos_ap_min
+        if ap_mask.sum() < 3:
+            continue
+
+        cand_indices = np.where(ap_mask)[0]
+        # 2. Among candidate partners, pick ones whose position is roughly
+        #    in the -n1 direction from p1 (the other side of the object)
+        v_to_partners = points[cand_indices] - p1  # vectors from p1 to candidates
+        # Exclude self (distance > 0)
+        dists = np.linalg.norm(v_to_partners, axis=1)
+        valid_dists = dists > 1e-8
+        if valid_dists.sum() < 3:
+            continue
+
+        cand_indices = cand_indices[valid_dists]
+        v_to_partners = v_to_partners[valid_dists]
+        dists = dists[valid_dists]
+
+        # Direction from p1 toward partner should align with inward normal at p1
+        # (both point toward the interior of the fragment)
+        dir_to = v_to_partners / dists[:, None]
+        alignment = (dir_to @ n1)  # how well aligned with inward normal
+        # Prefer partners on opposite side, with opposite inward normals
+        partner_dots = np.abs(dots[ap_mask][valid_dists])
+        score = alignment * partner_dots  # higher = better antipodal partner
+        # Take top candidates
+        num_to_try = min(max_tries, len(score))
+        best_partner_idx = np.argsort(score)[-num_to_try:][::-1]
+
+        for j in best_partner_idx:
+            i2 = cand_indices[j]
+            p2 = points[i2]
+            n2 = n_unit[i2]
+
+            ap_ok, _, _ = check_antipodal(p1, n1, p2, n2, mu)
+            if not ap_ok:
+                continue
+
+            gens1 = friction_cone_generators(n1, mu, m_generators)
+            gens2 = friction_cone_generators(n2, mu, m_generators)
+            W1 = build_contact_wrench(p1, gens1)
+            W2 = build_contact_wrench(p2, gens2)
+            W = combined_wrench_matrix(W1, W2)
+            fc_ok, eps, _, _ = test_force_closure_lp(W)
+
+            if fc_ok and eps > 1e-9:
+                cand = GraspCandidate(
+                    id=candidates_found + 1,
+                    contact1=p1,
+                    contact2=p2,
+                    normal1=n1,
+                    normal2=n2,
+                )
+                valid.append(cand)
+                candidates_found += 1
+                break  # found a partner for this contact1
+
+    rng.shuffle(valid)  # mix them up
+    # Re-number after shuffle
+    for i, c in enumerate(valid):
+        c.id = i + 1
+    return valid
+
+
 def load_candidates(
     source: str | list,
     num_generate: int = 0,
@@ -665,7 +836,7 @@ def load_candidates(
     """
     candidates = []
 
-    if isinstance(source, str) and Path(source).exists():
+    if isinstance(source, str) and source and Path(source).exists():
         with open(source) as f:
             data = json.load(f)
         for i, d in enumerate(data, 1):
@@ -774,6 +945,13 @@ def parse_args() -> argparse.Namespace:
         help="Random seed for reproducibility",
     )
     p.add_argument(
+        "--variance-scale",
+        type=float,
+        default=1.0,
+        help="Scale factor for epistemic variance (default: 1.0). "
+             "Use < 1.0 when variance is overestimated due to limited training data.",
+    )
+    p.add_argument(
         "--output",
         type=str,
         default="accepted_grasps.json",
@@ -784,7 +962,153 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable visualisation",
     )
+    p.add_argument(
+        "--save-grasp-ply",
+        action="store_true",
+        help="Export PLY with variance cloud + green/red grasp spheres",
+    )
+    p.add_argument(
+        "--save-plot",
+        action="store_true",
+        help="Export CVaR score bar chart as PNG",
+    )
     return p.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Visual export helpers
+# ---------------------------------------------------------------------------
+
+
+def save_grasp_ply(
+    path: str,
+    mean_cloud: np.ndarray,
+    variance: np.ndarray,
+    accepted: list[CandidateResult],
+    rejected: list[CandidateResult],
+    sphere_radius: float | None = None,
+) -> None:
+    """Export PLY with variance-coloured cloud + green/red grasp spheres."""
+    # Auto-scale sphere radius to ~2% of bbox diagonal
+    if sphere_radius is None:
+        diag = float(np.linalg.norm(mean_cloud.max(axis=0) - mean_cloud.min(axis=0)))
+        sphere_radius = diag * 0.02
+
+    geometries = []
+
+    # Variance cloud
+    from uncertainty.variance_cloud import variance_to_rgb
+    colours = variance_to_rgb(variance)
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(mean_cloud)
+    pcd.colors = o3d.utility.Vector3dVector(colours)
+    geometries.append(pcd)
+
+    # Accepted spheres (green)
+    for r in accepted:
+        s1 = o3d.geometry.TriangleMesh.create_sphere(radius=sphere_radius)
+        s1.translate(r.candidate.contact1)
+        s1.paint_uniform_color([0.0, 0.8, 0.0])
+        geometries.append(s1)
+
+        s2 = o3d.geometry.TriangleMesh.create_sphere(radius=sphere_radius)
+        s2.translate(r.candidate.contact2)
+        s2.paint_uniform_color([0.0, 0.8, 0.0])
+        geometries.append(s2)
+
+        # Line connecting pair
+        line = o3d.geometry.LineSet()
+        line.points = o3d.utility.Vector3dVector(
+            np.array([r.candidate.contact1, r.candidate.contact2])
+        )
+        line.lines = o3d.utility.Vector2iVector(np.array([[0, 1]]))
+        line.paint_uniform_color([0.0, 0.6, 0.0])
+        geometries.append(line)
+
+    # Rejected spheres (red)
+    for r in rejected:
+        s1 = o3d.geometry.TriangleMesh.create_sphere(radius=sphere_radius * 0.6)
+        s1.translate(r.candidate.contact1)
+        s1.paint_uniform_color([0.8, 0.0, 0.0])
+        geometries.append(s1)
+
+        s2 = o3d.geometry.TriangleMesh.create_sphere(radius=sphere_radius * 0.6)
+        s2.translate(r.candidate.contact2)
+        s2.paint_uniform_color([0.8, 0.0, 0.0])
+        geometries.append(s2)
+
+    o3d.io.write_point_cloud(path, pcd)
+    spheres_path = Path(path)
+    grasps_path = spheres_path.parent / f"{spheres_path.stem}_spheres.ply"
+
+    # Write spheres separately (Open3D doesn't merge mesh + pcd in one PLY)
+    sphere_geoms = [g for g in geometries if isinstance(g, o3d.geometry.TriangleMesh)]
+    if sphere_geoms:
+        combined = sphere_geoms[0]
+        for g in sphere_geoms[1:]:
+            combined += g
+        o3d.io.write_triangle_mesh(str(grasps_path), combined)
+
+    print(f"  Variance cloud → {path}")
+    if sphere_geoms:
+        print(f"  Grasp spheres → {grasps_path}")
+    print(f"  Accepted: {len(accepted)} (green spheres), "
+          f"Rejected: {len(rejected)} (red spheres)")
+
+
+def save_cvar_plot(
+    path: str,
+    candidates: list[GraspCandidate],
+    results: list[CandidateResult],
+    all_results: list[CandidateResult],
+) -> None:
+    """Export CVaR score bar chart + variance histogram as PNG."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("  WARNING: matplotlib not installed — skipping plot")
+        return
+
+    # Split into accepted / rejected
+    accepted = [r for r in all_results if r.accepted]
+    rejected = [r for r in all_results if not r.accepted]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    # ── Bar chart: CVaR scores ──
+    labels = [f"#{r.candidate.id}" for r in all_results]
+    scores = [r.cvar_epsilon for r in all_results]
+    baseline = [r.epsilon_baseline for r in all_results]
+    colours = ["#2ecc71" if r.accepted else "#e74c3c" for r in all_results]
+
+    x = range(len(all_results))
+    bars = ax1.bar(x, scores, color=colours, edgecolor="white", linewidth=1.2)
+    ax1.scatter(x, baseline, color="black", marker="_", s=200, linewidth=2,
+                label="Baseline ε")
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(labels)
+    ax1.set_ylabel("CVaR ε (grasp quality)")
+    ax1.set_title("CVaR Grasp Quality Ranking\n(green = accepted, red = rejected)")
+    ax1.legend()
+    ax1.grid(axis="y", alpha=0.3)
+
+    # ── Pie chart: acceptance rate ──
+    ax2.pie(
+        [len(accepted), len(rejected)],
+        labels=[f"Accepted ({len(accepted)})", f"Rejected ({len(rejected)})"],
+        colors=["#2ecc71", "#e74c3c"],
+        autopct="%1.0f%%",
+        startangle=90,
+        wedgeprops={"edgecolor": "white", "linewidth": 1.5},
+    )
+    ax2.set_title("CVaR Acceptance Rate")
+
+    plt.tight_layout()
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  CVaR chart → {path}")
 
 
 def main() -> None:
@@ -816,14 +1140,20 @@ def main() -> None:
     elif args.candidates:
         candidates = load_candidates(args.candidates)
     else:
-        print("  No candidates specified - generating random ones for testing")
-        bbox_min = mean_cloud.min(axis=0)
-        bbox_max = mean_cloud.max(axis=0)
-        bounds = np.array([bbox_min, bbox_max])
-        candidates = load_candidates(
-            "", num_generate=args.generate if args.generate > 0 else 15,
-            cloud_bounds=bounds,
+        num_to_gen = args.generate if args.generate > 0 else 15
+        print(f"  No candidates specified — generating {num_to_gen} surface-based antipodal pairs")
+        candidates = generate_antipodal_candidates(
+            points=mean_cloud,
+            normals=base_normals,
+            mu=args.mu,
+            m_generators=args.cone_generators,
+            num_candidates=num_to_gen,
+            sample_size=300,
+            max_tries=500,
+            seed=args.seed,
         )
+        print(f"  Found {len(candidates)} valid candidates"
+              f" ({len(candidates)/max(num_to_gen,1)*100:.0f}% success rate)")
 
     if not candidates:
         print("ERROR: No grasp candidates to validate.")
@@ -833,9 +1163,9 @@ def main() -> None:
 
     # ── Run CVaR validation ──
     print(f"\n=== CVaR Validation (mu={args.mu}, N={args.num_realizations}, "
-          f"alpha={args.cvar_alpha}) ===")
+          f"alpha={args.cvar_alpha}, var_scale={args.variance_scale}) ===")
 
-    results = validate_grasps(
+    results, all_results = validate_grasps(
         candidates=candidates,
         mean_cloud=mean_cloud,
         base_normals=base_normals,
@@ -844,6 +1174,7 @@ def main() -> None:
         m_generators=args.cone_generators,
         num_realizations=args.num_realizations,
         cvar_alpha=args.cvar_alpha,
+        variance_scale=args.variance_scale,
         seed=args.seed,
         verbose=True,
     )
@@ -893,6 +1224,20 @@ def main() -> None:
     with open(args.output, "w") as f:
         json.dump(output, f, indent=2)
     print(f"\n  Saved accepted grasps to {args.output}")
+
+    # ── Export visual outputs ──
+    if args.save_grasp_ply:
+        print(f"\n=== Exporting grasp PLY ===")
+        accepted_all = [r for r in all_results if r.accepted]
+        rejected_all = [r for r in all_results if not r.accepted]
+        save_grasp_ply(
+            "accepted_grasps.ply", mean_cloud, variance,
+            accepted_all, rejected_all,
+        )
+
+    if args.save_plot:
+        print(f"\n=== Exporting CVaR plot ===")
+        save_cvar_plot("cvar_scores.png", candidates, results, all_results)
 
     # ── Visualise ──
     if not args.no_viz:

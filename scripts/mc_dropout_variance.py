@@ -113,7 +113,7 @@ def load_model(
     embed_dim: int = 128,
     num_heads: int = 4,
     num_layers: int = 4,
-) -> GeoTransformer:
+) -> tuple[GeoTransformer, np.ndarray | None, float | None]:
     """
     Load GeoTransformer model from checkpoint or create fresh.
 
@@ -126,7 +126,9 @@ def load_model(
         num_layers:      Number of transformer blocks.
 
     Returns:
-        GeoTransformer model (weights loaded if checkpoint provided).
+        (model, centroid, scale) — centroid (3,) and scale (float) are
+        the normalization parameters used during training, or None if
+        no normalization is needed.
     """
     model = GeoTransformer(
         in_channels=in_channels,
@@ -135,21 +137,32 @@ def load_model(
         num_layers=num_layers,
         bottleneck_dropout=dropout_rate,
     )
+    centroid: np.ndarray | None = None
+    scale: float | None = None
 
     if checkpoint_path is not None:
         if not Path(checkpoint_path).exists():
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-        state_dict = torch.load(checkpoint_path, map_location="cpu")
+        ckpt = torch.load(checkpoint_path, map_location="cpu")
         # Handle different checkpoint formats
-        if "model_state_dict" in state_dict:
-            state_dict = state_dict["model_state_dict"]
+        if "model_state_dict" in ckpt:
+            state_dict = ckpt["model_state_dict"]
+            # Load normalization params if present
+            if "centroids" in ckpt and ckpt["centroids"]:
+                centroid = np.array(ckpt["centroids"][0], dtype=np.float32)
+            if "scales" in ckpt and ckpt["scales"]:
+                scale = float(ckpt["scales"][0])
+        else:
+            state_dict = ckpt
         model.load_state_dict(state_dict)
         print(f"  Loaded checkpoint: {Path(checkpoint_path).name}")
+        if centroid is not None:
+            print(f"  Normalisation: scale={scale:.1f}, centroid={centroid}")
     else:
         print("  WARNING: No checkpoint provided — using randomly initialised model.")
         print("  Variance values will reflect architectural uncertainty, not learned epistemic uncertainty.")
 
-    return model
+    return model, centroid, scale
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +254,7 @@ def main() -> None:
 
     # ── Load model ──
     print("\n=== Loading GeoTransformer ===")
-    model = load_model(
+    model, centroid, scale = load_model(
         checkpoint_path=args.model,
         dropout_rate=args.dropout_rate,
         embed_dim=args.embed_dim,
@@ -252,9 +265,16 @@ def main() -> None:
 
     # ── Load point cloud ──
     print(f"\n=== Loading point cloud ===")
-    point_cloud = load_point_cloud_with_normals(args.input)
-    N = point_cloud.shape[0]
+    raw_cloud = load_point_cloud_with_normals(args.input)
+    N = raw_cloud.shape[0]
     print(f"  Input shape: ({N}, 6) — [x,y,z, nx,ny,nz]")
+
+    # ── Apply normalisation (if checkpoint provides it) ──
+    point_cloud = raw_cloud.clone()
+    if centroid is not None and scale is not None:
+        centroid_t = torch.from_numpy(centroid).float()
+        point_cloud[:, :3] = (point_cloud[:, :3] - centroid_t) / scale
+        print(f"  Normalised: (pos - centroid) / {scale:.1f}")
 
     # ── MC Dropout inference ──
     print(f"\n=== Running MC Dropout Inference ===")
@@ -268,6 +288,14 @@ def main() -> None:
         device=device,
         verbose=True,
     )
+
+    # ── Denormalise output ──
+    if centroid is not None and scale is not None:
+        centroid_t = centroid_t.to(mean.device)
+        mean = mean * scale + centroid_t
+        # Variance scales quadratically
+        variance = variance * (scale ** 2)
+        print(f"\n  Denormalised: pos * {scale:.1f} + centroid")
 
     # ── Statistics ──
     print(f"\n=== Variance Statistics ===")

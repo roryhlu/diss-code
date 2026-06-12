@@ -312,6 +312,22 @@ class MCDropoutBottleneck(nn.Module):
         return x
 
 
+class MCDropout(nn.Module):
+    """
+    Dropout wrapper that participates in the model-wide MC mode.
+
+    All instances are controlled via set_mc_mode() on the top-level
+    GeoTransformer, which propagates to every MCDropout submodule.
+    """
+
+    def __init__(self, p: float = 0.2):
+        super().__init__()
+        self.dropout = nn.Dropout(p)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.dropout(x)
+
+
 # ---------------------------------------------------------------------------
 # Feature Decoder
 # ---------------------------------------------------------------------------
@@ -324,6 +340,9 @@ class FeatureDecoder(nn.Module):
     Reconstructs/completes the point cloud from the transformer's
     latent representation.  The output is a predicted position for
     each input point — effectively a denoised, completed surface.
+
+    Dropout is applied between layers and is controlled by the
+    model-wide MC mode flag (set_mc_mode on GeoTransformer).
     """
 
     def __init__(
@@ -331,13 +350,16 @@ class FeatureDecoder(nn.Module):
         in_dim: int = 128,
         hidden_dim: int = 64,
         out_dim: int = 3,
+        dropout: float = 0.2,
     ):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
             nn.GELU(),
+            MCDropout(dropout),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.GELU(),
+            MCDropout(dropout),
             nn.Linear(hidden_dim // 2, out_dim),
         )
 
@@ -392,7 +414,7 @@ class GeoTransformer(nn.Module):
             embed_dim, num_heads, num_layers, mlp_ratio, dropout,
         )
         self.bottleneck = MCDropoutBottleneck(bottleneck_dropout)
-        self.decoder = FeatureDecoder(embed_dim, embed_dim // 2, 3)
+        self.decoder = FeatureDecoder(embed_dim, embed_dim // 2, 3, dropout=bottleneck_dropout)
 
         # Positional encoding: sinusoidal embedding of 3D coordinates
         self.pos_encoding = SinusoidalPositionEncoding(embed_dim)
@@ -449,6 +471,9 @@ class GeoTransformer(nn.Module):
     def set_mc_mode(self, enabled: bool):
         """Enable/disable MC Dropout for stochastic inference."""
         self.bottleneck.set_mc_mode(enabled)
+        for module in self.modules():
+            if isinstance(module, MCDropout) and module is not self.bottleneck:
+                module.dropout.train(enabled)  # force dropout active at inference
 
 
 # ---------------------------------------------------------------------------
@@ -491,11 +516,17 @@ class SinusoidalPositionEncoding(nn.Module):
         Returns:
             Positional encoding, shape (N, d_model).
         """
-        # positions: (N, 3) → (N, 3, 1) * (1, 1, d/6) → (N, 3, d/6)
+        # positions: (N, 3) → (N, 3, 1) * (1, 1, d/6) → (N, 3, d_per_axis)
         angles = positions.unsqueeze(-1) * self.frequencies.unsqueeze(0).unsqueeze(0)
-        # (N, 3, d/6) → sin, cos → (N, 3, d/3) → (N, d)
+        # (N, 3, d_per_axis) → sin, cos → (N, 3, 2*d_per_axis)
         encoding = torch.cat([
             torch.sin(angles),
             torch.cos(angles),
         ], dim=-1)
-        return encoding.view(positions.shape[0], -1)
+        encoding = encoding.view(positions.shape[0], -1)
+        # Pad to d_model when not perfectly divisible by 6
+        if encoding.shape[-1] < self.d_model:
+            encoding = F.pad(encoding, (0, self.d_model - encoding.shape[-1]))
+        elif encoding.shape[-1] > self.d_model:
+            encoding = encoding[:, :self.d_model]
+        return encoding

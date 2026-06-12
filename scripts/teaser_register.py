@@ -159,7 +159,7 @@ def main() -> None:
     if result.certificate is not None:
         print(f"  TLS certificate:     {result.certificate:.6f} (suboptimality bound)")
     else:
-        print(f"  TLS certificate:     N/A (RANSAC fallback)")
+        print(f"  TLS certificate:     N/A")
     print(f"  SE(3) validated:      True")
     print(f"  SE(3) matrix:\n{np.array2string(T_matrix, precision=6, suppress_small=True)}")
 

@@ -289,8 +289,8 @@ def run_mc_pose_inference(
     if params is None:
         params = {}
     if model is not None:
-        model.set_mc_mode(True)
         model.eval()
+        model.set_mc_mode(True)
         model.to(device)
 
     poses = []

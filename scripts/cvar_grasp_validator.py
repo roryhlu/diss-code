@@ -1260,8 +1260,26 @@ def main() -> None:
             contact2=np.array(args.contact2, dtype=np.float64),
         )]
         print(f"  Using single contact pair from CLI")
-    elif args.candidates:
+    elif args.candidates and not args.mesh:
+        # Pre-made candidates — only trust them without mesh (old behaviour)
         candidates = load_candidates(args.candidates)
+    elif args.candidates and args.mesh:
+        # Mesh overrides: generate fresh candidates on the ground-truth surface
+        print(f"  Mesh provided — generating fresh antipodal candidates on mesh surface")
+        print(f"  (Ignores --candidates file — canonical geometry overrides pre-made contacts)")
+        num_to_gen = args.generate if args.generate > 0 else 15
+        candidates = generate_antipodal_candidates(
+            points=mean_cloud,
+            normals=base_normals,
+            mu=args.mu,
+            m_generators=args.cone_generators,
+            num_candidates=num_to_gen,
+            sample_size=300,
+            max_tries=500,
+            seed=args.seed,
+        )
+        print(f"  Found {len(candidates)} valid candidates on mesh surface"
+              f" ({len(candidates)/max(num_to_gen,1)*100:.0f}% success rate)")
     else:
         num_to_gen = args.generate if args.generate > 0 else 15
         print(f"  No candidates specified — generating {num_to_gen} surface-based antipodal pairs")

@@ -345,8 +345,106 @@ def test_force_closure_lp(W: np.ndarray) -> tuple[bool, float, str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Variance cloud I/O
+# Mesh geometry loader (for hybrid mesh + variance-cloud pipeline)
 # ---------------------------------------------------------------------------
+
+
+def load_mesh_for_geometry(
+    mesh_path: str,
+    voxel_size: float = 0.005,
+    k_normals: int = 30,
+) -> tuple[np.ndarray, np.ndarray]:
+    r"""
+    Load and voxel-downsample an OBJ mesh for surface geometry.
+
+    The mesh provides accurate surface positions and normals for
+    contact-point lookup, decoupled from the variance cloud's
+    mean positions (which are GeoTransformer predictions, not
+    ground-truth geometry).
+
+    Returns:
+        (points, normals) — both (M, 3) float64, M ≈ number of
+        points in the variance cloud after 5mm downsampling.
+    """
+    import trimesh
+
+    mesh = trimesh.load(mesh_path, process=False)
+    if hasattr(mesh, "geometry") and isinstance(mesh, trimesh.Scene):
+        verts = []
+        for geom in mesh.geometry.values():
+            verts.append(np.asarray(geom.vertices, dtype=np.float64))
+        points = np.vstack(verts) if verts else np.array([])
+    else:
+        points = np.asarray(mesh.vertices, dtype=np.float64)
+
+    if len(points) == 0:
+        raise ValueError(f"No vertices found in '{mesh_path}'")
+
+    # Centre the mesh — contact coordinates are in object-local frame
+    mesh_centroid = points.mean(axis=0)
+    points = points - mesh_centroid
+    print(f"  Centred mesh (was [{mesh_centroid[0]:.0f}, {mesh_centroid[1]:.0f}, {mesh_centroid[2]:.0f}])")
+
+    # Voxel-downsample to match variance cloud density
+    if voxel_size > 0:
+        min_pt = points.min(axis=0)
+        voxel_idx = np.floor((points - min_pt) / voxel_size).astype(np.int64)
+        span = voxel_idx.max(axis=0) - voxel_idx.min(axis=0) + 1
+        ids = (
+            voxel_idx[:, 0] * span[1] * span[2]
+            + voxel_idx[:, 1] * span[2]
+            + voxel_idx[:, 2]
+        )
+        _, inverse = np.unique(ids, return_inverse=True)
+        n_voxels = inverse.max() + 1
+        down = np.zeros((n_voxels, 3), dtype=np.float64)
+        np.add.at(down, inverse, points)
+        counts = np.bincount(inverse, minlength=n_voxels).astype(np.float64)
+        counts = np.maximum(counts, 1.0)
+        points = down / counts[:, None]
+
+    # Estimate normals
+    from scipy.spatial import cKDTree
+    tree = cKDTree(points)
+    _, idx = tree.query(points, k=min(k_normals, len(points)))
+    neighbours = points[idx]
+    mu_n = neighbours.mean(axis=1, keepdims=True)
+    centred = neighbours - mu_n
+    cov = np.einsum("nki,nkj->nij", centred, centred) / (min(k_normals, len(points)) - 1)
+    _, eigvecs = np.linalg.eigh(cov)
+    normals = eigvecs[:, :, 0].copy()
+    centroid = points.mean(axis=0)
+    dot = np.sum(normals * (points - centroid), axis=1)
+    normals[dot < 0] *= -1.0
+    ns = np.linalg.norm(normals, axis=1, keepdims=True)
+    ns[ns < 1e-12] = 1.0
+    normals /= ns
+
+    return points, normals
+
+
+def map_variance_to_geometry(
+    variance_cloud_points: np.ndarray,
+    variance_values: np.ndarray,
+    geometry_points: np.ndarray,
+) -> np.ndarray:
+    r"""
+    Map per-point epistemic variance from the variance cloud to
+    geometry points via nearest-neighbour lookup.
+
+    The variance cloud and geometry cloud are in the same coordinate
+    frame (object-local), so the nearest neighbour in the variance
+    cloud provides the epistemic variance for each geometry point.
+
+    Returns (M,) variance array matching geometry_points.
+    """
+    from scipy.spatial import cKDTree
+    tree = cKDTree(variance_cloud_points)
+    _, idx = tree.query(geometry_points, k=1)
+    return variance_values[idx]
+
+
+# ---------------------------------------------------------------------------\n# Variance cloud I/O\n# ---------------------------------------------------------------------------
 
 def load_variance_cloud(file_path: str) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -972,6 +1070,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Export CVaR score bar chart as PNG",
     )
+    p.add_argument(
+        "--mesh",
+        type=str,
+        default=None,
+        help="Path to original fragment OBJ mesh. When provided, surface "
+             "geometry and normals come from the mesh (accurate contact-point "
+             "lookup) while variance values come from the PCD (MC Dropout "
+             "epistemic uncertainty).",
+    )
     return p.parse_args()
 
 
@@ -1122,11 +1229,27 @@ def main() -> None:
     # ── Load variance cloud ──
     print("=== Loading variance cloud ===")
     mean_cloud, variance = load_variance_cloud(args.variance_cloud)
+    variance_cloud_pts = mean_cloud.copy()  # keep original for variance mapping
 
-    # ── Estimate reference normals ──
-    print("\n=== Estimating reference normals ===")
-    base_normals = estimate_normals_from_cloud(mean_cloud)
-    print(f"  Estimated normals for {len(mean_cloud):,} points")
+    # ── Load mesh geometry (optional, for accurate surface normals) ──
+    if args.mesh:
+        print(f"\n=== Loading mesh geometry from {args.mesh} ===")
+        mesh_pts, mesh_normals = load_mesh_for_geometry(args.mesh)
+        print(f"  Mesh points: {len(mesh_pts):,} (voxel-downsampled)")
+        # Centre the variance cloud positions to match the centred mesh
+        vc_centroid = variance_cloud_pts.mean(axis=0)
+        variance_cloud_pts_centred = variance_cloud_pts - vc_centroid
+        # Map variance values from the variance cloud to mesh points
+        variance = map_variance_to_geometry(variance_cloud_pts_centred, variance, mesh_pts)
+        print(f"  Variance mapped from variance cloud → mesh points")
+        # Use mesh geometry for contact lookup, variance for CVaR
+        mean_cloud = mesh_pts
+        base_normals = mesh_normals
+    else:
+        # ── Estimate reference normals from variance cloud ──
+        print("\n=== Estimating reference normals ===")
+        base_normals = estimate_normals_from_cloud(mean_cloud)
+        print(f"  Estimated normals for {len(mean_cloud):,} points")
 
     # ── Load candidates ──
     print("\n=== Loading grasp candidates ===")

@@ -19,7 +19,7 @@
 
 set -e
 
-HAMILTON="fwvp47@hamilton.dur.ac.uk"
+HAMILTON="fwvp47@hamilton8.dur.ac.uk"
 WORK_DIR="/nobackup/fwvp47/repair_training"
 
 echo "=== RePAIR Hamilton Setup ==="

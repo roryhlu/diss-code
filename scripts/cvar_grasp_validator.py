@@ -414,7 +414,10 @@ def load_mesh_for_geometry(
     _, eigvecs = np.linalg.eigh(cov)
     normals = eigvecs[:, :, 0].copy()
     centroid = points.mean(axis=0)
-    dot = np.sum(normals * (points - centroid), axis=1)
+    # Orient normals INWARD (towards centroid from surface).
+    # The CVaR antipodal check expects inward-pointing normals because
+    # a finger applying force presses INTO the object, not away from it.
+    dot = np.sum(normals * (centroid - points), axis=1)
     normals[dot < 0] *= -1.0
     ns = np.linalg.norm(normals, axis=1, keepdims=True)
     ns[ns < 1e-12] = 1.0

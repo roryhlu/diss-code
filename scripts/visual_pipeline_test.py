@@ -80,6 +80,17 @@ def _transform_points(T, pts):
     return pts @ T[:3,:3].T + T[:3,3]
 
 
+def _load_obj_vertices(path: str) -> np.ndarray:
+    """Fast line-by-line OBJ vertex extraction — reads only 'v ' lines."""
+    vertices = []
+    with open(path, encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            if line.startswith("v "):
+                parts = line.split()
+                vertices.append([float(parts[1]), float(parts[2]), float(parts[3])])
+    return np.array(vertices, dtype=np.float64)
+
+
 # ── Blender render.py generator ─────────────────────────────────────
 
 
@@ -226,8 +237,8 @@ def main() -> None:
     print("=== 1. Loading fragment mesh ===")
     ext = Path(args.fragment).suffix.lower()
     if ext == ".obj":
-        from scripts.export_for_blender import load_mesh as _load_obj
-        model_points = _load_obj(args.fragment)
+        # Fast line-by-line OBJ vertex extraction (no Open3D, no trimesh)
+        model_points = _load_obj_vertices(args.fragment)
         if len(model_points) == 0:
             raise SystemExit(f"No vertices found in '{args.fragment}'")
     else:
@@ -327,30 +338,60 @@ def main() -> None:
     accepted_ply = output_dir / "grasps_accepted.ply"
     rejected_ply = output_dir / "grasps_rejected.ply"
 
-    # Generate grasp candidates from mesh
-    from scripts.export_for_blender import load_mesh, estimate_normals, compute_grasp_spheres
+    # Use the fragment vertices for grasp geometry
+    mesh_pts = model_points
+    # Estimate normals via vectorised PCA
+    from scipy.spatial import cKDTree
+    k_n = min(30, len(mesh_pts))
+    tree = cKDTree(mesh_pts)
+    _, idx = tree.query(mesh_pts, k=k_n)
+    neighbours = mesh_pts[idx]
+    mu_n = neighbours.mean(axis=1, keepdims=True)
+    centred_n = neighbours - mu_n
+    cov = np.einsum("nki,nkj->nij", centred_n, centred_n) / (k_n - 1)
+    _, eigvecs = np.linalg.eigh(cov)
+    mesh_normals = eigvecs[:, :, 0].copy()
+    centroid_m = mesh_pts.mean(axis=0)
+    dot = np.sum(mesh_normals * (centroid_m - mesh_pts), axis=1)
+    mesh_normals[dot < 0] *= -1.0
+    ns = np.linalg.norm(mesh_normals, axis=1, keepdims=True)
+    ns[ns < 1e-12] = 1.0
+    mesh_normals /= ns
 
-    try:
-        mesh_pts = load_mesh(args.fragment)
-        mesh_normals = estimate_normals(mesh_pts)
-    except Exception:
-        mesh_pts = model_points
-        mesh_normals = np.zeros_like(model_points)
-
-    # Generate a few grasping candidates
-    accepted, rejected = compute_grasp_spheres(
-        mesh_pts, mesh_normals, mu=args.mu, seed=seed,
-    )
+    # Generate antipodal pairs
+    rng = np.random.default_rng(seed)
+    cos_alpha = np.cos(np.arctan(args.mu))
+    cos_ap_min = cos_alpha * 0.5
+    accepted = []
+    rejected_all = []
+    for _ in range(15 * 100):
+        if len(accepted) + len(rejected_all) >= 15:
+            break
+        i = rng.integers(0, len(mesh_pts))
+        j = rng.integers(0, len(mesh_pts))
+        if i == j:
+            continue
+        d = mesh_pts[j] - mesh_pts[i]
+        dist = np.linalg.norm(d)
+        if dist < 1e-9:
+            continue
+        d_hat = d / dist
+        s1 = float(np.dot(d_hat, mesh_normals[i]))
+        s2 = float(np.dot(-d_hat, mesh_normals[j]))
+        if s1 >= cos_ap_min and s2 >= cos_ap_min:
+            # Strict check
+            if s1 >= cos_alpha - 1e-9 and s2 >= cos_alpha - 1e-9:
+                accepted.append((mesh_pts[i], mesh_pts[j]))
+            else:
+                rejected_all.append((mesh_pts[i], mesh_pts[j]))
 
     if accepted:
         pts_acc = []
         cols_acc = []
         for c1, c2 in accepted:
-            # Small spheres at contacts + small line
             for pt in [c1, c2]:
-                # Generate tiny sphere point cloud
-                rng = np.random.default_rng(hash(str(c1)) % 2**32)
-                sphere_pts = rng.normal(0, 0.003, (200, 3)) + pt
+                rng_s = np.random.default_rng(hash(str(c1)) % 2**32)
+                sphere_pts = rng_s.normal(0, 0.003, (200, 3)) + pt
                 pts_acc.append(sphere_pts)
                 cols_acc.append(np.full((200, 3), [0.0, 1.0, 0.2]))
         if pts_acc:
@@ -358,21 +399,21 @@ def main() -> None:
                               np.vstack(pts_acc), np.vstack(cols_acc))
             print(f"  {len(accepted)} accepted grasps → {accepted_ply.name}")
 
-    if rejected:
+    if rejected_all:
         pts_rej = []
         cols_rej = []
-        for c1, c2 in rejected[:min(len(rejected), 10)]:
-            rng = np.random.default_rng(hash(str(c1) + "r") % 2**32)
+        for c1, c2 in rejected_all[:min(len(rejected_all), 10)]:
+            rng_s = np.random.default_rng(hash(str(c1) + "r") % 2**32)
             for pt in [c1, c2]:
-                sphere_pts = rng.normal(0, 0.002, (100, 3)) + pt
+                sphere_pts = rng_s.normal(0, 0.002, (100, 3)) + pt
                 pts_rej.append(sphere_pts)
                 cols_rej.append(np.full((100, 3), [1.0, 0.1, 0.1]))
         if pts_rej:
             write_ply_coloured(str(rejected_ply),
                               np.vstack(pts_rej), np.vstack(cols_rej))
-            print(f"  {len(rejected)} rejected grasps → {rejected_ply.name}")
+            print(f"  {len(rejected_all)} rejected grasps → {rejected_ply.name}")
 
-    if not accepted and not rejected:
+    if not accepted and not rejected_all:
         # Generate at least some spheres for visualisation
         print("  No grasp candidates generated — creating sample spheres.")
         centroid_m = model_points.mean(axis=0)

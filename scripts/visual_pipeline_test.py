@@ -39,7 +39,7 @@ import numpy as np
 
 
 def write_ply_coloured(path: str, points: np.ndarray, colours: np.ndarray) -> None:
-    """Write a binary PLY with x,y,z and uchar red,green,blue."""
+    """Write a binary PLY with x,y,z (double) and red,green,blue (uchar)."""
     n = len(points)
     header = (
         "ply\n"
@@ -56,10 +56,14 @@ def write_ply_coloured(path: str, points: np.ndarray, colours: np.ndarray) -> No
     )
     if np.issubdtype(colours.dtype, np.floating):
         colours = np.clip(colours * 255, 0, 255).astype(np.uint8)
-    data = np.column_stack([points.astype(np.float64), colours.astype(np.uint8)])
+    # Write interleaved: 3 doubles + 3 uchars per vertex (no dtype promotion)
     with open(path, "wb") as f:
         f.write(header.encode("ascii"))
-        f.write(data.tobytes())
+        pts = points.astype(np.float64)
+        cls = colours.astype(np.uint8)
+        for i in range(n):
+            f.write(pts[i].tobytes())
+            f.write(cls[i].tobytes())
 
 
 def _random_se3(max_angle_deg=25.0, max_translation=0.03, seed=None):
@@ -109,19 +113,31 @@ def generate_blender_script(
 
 import bpy
 import os
-from pathlib import Path
 from math import radians
 
-BASE = r"{output_dir}"
+BASE = r"{output_dir.resolve()}"
+if not os.path.isabs(BASE):
+    BASE = os.path.join(os.path.dirname(__file__), BASE)
 
 # ── Clear default scene ──
 bpy.ops.object.select_all(action='SELECT')
-bpy.ops.object.delete(use_confirm=False)
+bpy.ops.object.delete()
 
-# ── Import PLY files ──
+# ── Import PLY files (Blender 3.x + 4.x compatible) ──
 def import_ply(path, name, color_rgb):
-    bpy.ops.wm.ply_import(filepath=path)
+    abspath = os.path.join(BASE, path) if not os.path.isabs(path) else path
+    if not os.path.exists(abspath):
+        print(f"WARNING: File not found: {{abspath}}")
+        return None
+    # Try Blender 4.x API first, fall back to 3.x
+    try:
+        bpy.ops.wm.ply_import(filepath=abspath)
+    except AttributeError:
+        bpy.ops.import_mesh.ply(filepath=abspath)
     obj = bpy.context.active_object
+    if obj is None:
+        print(f"WARNING: Failed to import {{abspath}}")
+        return None
     obj.name = name
     # Create material
     mat = bpy.data.materials.new(name=name + "_mat")
@@ -130,13 +146,6 @@ def import_ply(path, name, color_rgb):
     bsdf.inputs["Base Color"].default_value = (*color_rgb, 1.0)
     bsdf.inputs["Roughness"].default_value = 0.4
     obj.data.materials.append(mat)
-    return obj
-
-def import_ply_scene(path, name):
-    """Import a scene-type PLY (just points, no material needed)."""
-    bpy.ops.wm.ply_import(filepath=path)
-    obj = bpy.context.active_object
-    obj.name = name
     return obj
 
 # ── Camera ──
@@ -170,40 +179,50 @@ bg.inputs["Strength"].default_value = 0.5
 # ── Import all pipeline assets ──
 print("Importing RePAIR pipeline assets ...")
 
-mesh_obj = import_ply(os.path.join(BASE, "{Path(mesh_file).name}"), "CAD_Model", (0.7, 0.7, 0.7))
-scene_obj = import_ply(os.path.join(BASE, "{Path(scene_file).name}"), "Scene_Cloud", (0.1, 0.3, 0.9))
-aligned_obj = import_ply(os.path.join(BASE, "{Path(aligned_file).name}"), "Aligned_Cloud", (0.0, 0.8, 0.2))
-variance_obj = import_ply(os.path.join(BASE, "{Path(variance_file).name}"), "Variance_Cloud", (0.5, 0.5, 0.5))
+mesh_obj = import_ply("{Path(mesh_file).name}", "CAD_Model", (0.7, 0.7, 0.7))
+scene_obj = import_ply("{Path(scene_file).name}", "Scene_Cloud", (0.1, 0.3, 0.9))
+aligned_obj = import_ply("{Path(aligned_file).name}", "Aligned_Cloud", (0.0, 0.8, 0.2))
 
 # Variance cloud: colour from vertex colours (PLY has uchar rgb)
+variance_obj = import_ply("{Path(variance_file).name}", "Variance_Cloud", (0.5, 0.5, 0.5))
 if variance_obj and variance_obj.data.color_attributes:
     mat_var = variance_obj.data.materials[0]
     mat_var.use_nodes = True
     bsdf_var = mat_var.node_tree.nodes["Principled BSDF"]
-    attr = mat_var.node_tree.nodes.new("ShaderNodeVertexColor")
-    attr.layer_name = variance_obj.data.color_attributes[0].name
-    mat_var.node_tree.links.new(attr.outputs["Color"], bsdf_var.inputs["Base Color"])
+    try:
+        attr = mat_var.node_tree.nodes.new("ShaderNodeVertexColor")
+        mat_var.node_tree.links.new(attr.outputs["Color"], bsdf_var.inputs["Base Color"])
+    except Exception:
+        pass
 
 # Grasp spheres
 accepted_path = os.path.join(BASE, "{Path(accepted_file).name}")
 rejected_path = os.path.join(BASE, "{Path(rejected_file).name}")
 if os.path.exists(accepted_path):
-    acc_obj = import_ply_scene(accepted_path, "Grasps_Accepted")
-    mat_acc = bpy.data.materials.new(name="Accepted_mat")
-    mat_acc.use_nodes = True
-    mat_acc.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (0.0, 1.0, 0.2, 1.0)
-    mat_acc.node_tree.nodes["Principled BSDF"].inputs["Emission Color"].default_value = (0.0, 0.3, 0.05, 1.0)
-    mat_acc.node_tree.nodes["Principled BSDF"].inputs["Emission Strength"].default_value = 2.0
-    acc_obj.data.materials.append(mat_acc)
+    print(f"Loading accepted grasps: {{accepted_path}}")
+    bpy.ops.wm.ply_import(filepath=accepted_path) if hasattr(bpy.ops.wm, 'ply_import') else bpy.ops.import_mesh.ply(filepath=accepted_path)
+    acc_obj = bpy.context.active_object
+    if acc_obj:
+        acc_obj.name = "Grasps_Accepted"
+        mat_acc = bpy.data.materials.new(name="Accepted_mat")
+        mat_acc.use_nodes = True
+        mat_acc.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (0.0, 1.0, 0.2, 1.0)
+        mat_acc.node_tree.nodes["Principled BSDF"].inputs["Emission Color"].default_value = (0.0, 0.3, 0.05, 1.0)
+        mat_acc.node_tree.nodes["Principled BSDF"].inputs["Emission Strength"].default_value = 2.0
+        acc_obj.data.materials.append(mat_acc)
 
 if os.path.exists(rejected_path):
-    rej_obj = import_ply_scene(rejected_path, "Grasps_Rejected")
-    mat_rej = bpy.data.materials.new(name="Rejected_mat")
-    mat_rej.use_nodes = True
-    mat_rej.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (1.0, 0.1, 0.1, 1.0)
-    mat_rej.node_tree.nodes["Principled BSDF"].inputs["Emission Color"].default_value = (0.3, 0.0, 0.0, 1.0)
-    mat_rej.node_tree.nodes["Principled BSDF"].inputs["Emission Strength"].default_value = 1.5
-    rej_obj.data.materials.append(mat_rej)
+    print(f"Loading rejected grasps: {{rejected_path}}")
+    bpy.ops.wm.ply_import(filepath=rejected_path) if hasattr(bpy.ops.wm, 'ply_import') else bpy.ops.import_mesh.ply(filepath=rejected_path)
+    rej_obj = bpy.context.active_object
+    if rej_obj:
+        rej_obj.name = "Grasps_Rejected"
+        mat_rej = bpy.data.materials.new(name="Rejected_mat")
+        mat_rej.use_nodes = True
+        mat_rej.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (1.0, 0.1, 0.1, 1.0)
+        mat_rej.node_tree.nodes["Principled BSDF"].inputs["Emission Color"].default_value = (0.3, 0.0, 0.0, 1.0)
+        mat_rej.node_tree.nodes["Principled BSDF"].inputs["Emission Strength"].default_value = 1.5
+        rej_obj.data.materials.append(mat_rej)
 
 # ── Scene setup ──
 bpy.context.scene.render.engine = 'CYCLES'

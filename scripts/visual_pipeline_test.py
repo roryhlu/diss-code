@@ -224,10 +224,17 @@ def main() -> None:
 
     # ── 1. Load fragment mesh ──
     print("=== 1. Loading fragment mesh ===")
-    pcd = o3d.io.read_point_cloud(args.fragment)
-    if not pcd.has_points():
-        raise SystemExit(f"No points in '{args.fragment}'")
-    model_points = np.asarray(pcd.points, dtype=np.float64)
+    ext = Path(args.fragment).suffix.lower()
+    if ext == ".obj":
+        from scripts.export_for_blender import load_mesh as _load_obj
+        model_points = _load_obj(args.fragment)
+        if len(model_points) == 0:
+            raise SystemExit(f"No vertices found in '{args.fragment}'")
+    else:
+        pcd = o3d.io.read_point_cloud(args.fragment)
+        if not pcd.has_points():
+            raise SystemExit(f"No points in '{args.fragment}'")
+        model_points = np.asarray(pcd.points, dtype=np.float64)
     print(f"  {len(model_points):,} points")
 
     # Export coloured CAD mesh (grey)

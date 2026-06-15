@@ -39,31 +39,26 @@ import numpy as np
 
 
 def write_ply_coloured(path: str, points: np.ndarray, colours: np.ndarray) -> None:
-    """Write a binary PLY with x,y,z (double) and red,green,blue (uchar)."""
+    """Write an ASCII PLY with x,y,z (float) and red,green,blue (uchar)."""
     n = len(points)
-    header = (
-        "ply\n"
-        "format binary_little_endian 1.0\n"
-        f"comment Created by RePAIR visual pipeline\n"
-        f"element vertex {n}\n"
-        "property double x\n"
-        "property double y\n"
-        "property double z\n"
-        "property uchar red\n"
-        "property uchar green\n"
-        "property uchar blue\n"
-        "end_header\n"
-    )
     if np.issubdtype(colours.dtype, np.floating):
         colours = np.clip(colours * 255, 0, 255).astype(np.uint8)
-    # Write interleaved: 3 doubles + 3 uchars per vertex (no dtype promotion)
-    with open(path, "wb") as f:
-        f.write(header.encode("ascii"))
-        pts = points.astype(np.float64)
-        cls = colours.astype(np.uint8)
+    pts = points.astype(np.float64)
+    cls = colours.astype(np.uint8)
+    with open(path, "w") as f:
+        f.write("ply\n")
+        f.write("format ascii 1.0\n")
+        f.write(f"element vertex {n}\n")
+        f.write("property float x\n")
+        f.write("property float y\n")
+        f.write("property float z\n")
+        f.write("property uchar red\n")
+        f.write("property uchar green\n")
+        f.write("property uchar blue\n")
+        f.write("end_header\n")
         for i in range(n):
-            f.write(pts[i].tobytes())
-            f.write(cls[i].tobytes())
+            f.write(f"{pts[i,0]:.8f} {pts[i,1]:.8f} {pts[i,2]:.8f} "
+                    f"{cls[i,0]} {cls[i,1]} {cls[i,2]}\n")
 
 
 def _random_se3(max_angle_deg=25.0, max_translation=0.03, seed=None):
@@ -109,7 +104,10 @@ def generate_blender_script(
 ) -> str:
     """Generate a standalone Blender Python script that loads and renders everything."""
     return f'''
-"""RePAIR Pipeline Visualisation — run in Blender Scripting workspace."""
+"""RePAIR Pipeline Visualisation — run in Blender Scripting workspace.
+
+Prerequisite: Edit → Preferences → Add-ons → enable 'Import-Export: Stanford PLY format'
+"""
 
 import bpy, os
 from math import radians
@@ -120,28 +118,24 @@ BASE = r"{output_dir.resolve()}"
 bpy.ops.object.select_all(action='SELECT')
 bpy.ops.object.delete()
 
-# ── Import a PLY file (Blender 4.x + 3.x) ──
+# ── Import an ASCII PLY file ──
 def import_ply(filename, obj_name):
     path = os.path.join(BASE, filename)
     if not os.path.exists(path):
-        print(f"  MISSING: {{path}}")
+        print(f"  MISSING: {{filename}}  ({{path}})")
         return None
     print(f"  Loading: {{filename}} ...")
-    # Blender 4.0+ uses import_mesh.ply; 3.x uses wm.ply_import
-    try:
-        bpy.ops.import_mesh.ply(filepath=path)
-    except AttributeError:
-        bpy.ops.wm.ply_import(filepath=path)
+    bpy.ops.import_mesh.ply(filepath=path)
     obj = bpy.context.active_object
     if obj is None:
-        print(f"  FAILED to import {{path}}")
+        print(f"  FAILED: {{filename}} — no object created. Is the PLY addon enabled?")
         return None
     obj.name = obj_name
     print(f"    -> {{len(obj.data.vertices)}} vertices")
     return obj
 
-# ── Camera (positioned for ~0.05m fragment at origin) ──
-bpy.ops.object.camera_add(location=(0.08, -0.12, 0.06))
+# ── Camera (for ~0.05m fragment at origin) ──
+bpy.ops.object.camera_add(location=(0.08, -0.10, 0.06))
 cam = bpy.context.active_object
 cam.name = "RenderCam"
 cam.rotation_euler = (radians(65), 0, radians(40))
@@ -155,9 +149,9 @@ def add_light(name, loc, energy, size=0.3):
     lt.data.energy = energy
     lt.data.size = size
 
-add_light("Key",  (0.10, -0.15, 0.12), 300)
-add_light("Fill", (-0.08, -0.05, 0.08), 150)
-add_light("Rim",  (0.00,  0.15, 0.06), 200)
+add_light("Key",  (0.10, -0.12, 0.10), 300, 0.2)
+add_light("Fill", (-0.08, -0.04, 0.06), 150, 0.2)
+add_light("Rim",  (0.00,  0.12, 0.06), 200, 0.2)
 
 # ── Dark background ──
 bpy.data.worlds["World"].use_nodes = True
@@ -181,23 +175,21 @@ def set_mat(obj, r, g, b, roughness=0.4):
     mat.node_tree.nodes["Principled BSDF"].inputs["Roughness"].default_value = roughness
     obj.data.materials.append(mat)
 
-set_mat(mesh_obj,    0.75, 0.75, 0.75)   # grey
-set_mat(scene_obj,   0.10, 0.35, 0.90)   # blue
-set_mat(aligned_obj, 0.00, 0.80, 0.20)   # green
-set_mat(var_obj,     0.60, 0.60, 0.60)   # base grey (vertex colours override)
+set_mat(mesh_obj,    0.75, 0.75, 0.75)
+set_mat(scene_obj,   0.10, 0.35, 0.90)
+set_mat(aligned_obj, 0.00, 0.80, 0.20)
+set_mat(var_obj,     0.60, 0.60, 0.60)
 
-# ── Vertex colours for variance cloud ──
+# ── Vertex colours on variance cloud ──
 if var_obj and var_obj.data.color_attributes:
     try:
         mat_var = var_obj.data.materials[0]
         attr_node = mat_var.node_tree.nodes.new("ShaderNodeVertexColor")
         mat_var.node_tree.links.new(
             attr_node.outputs["Color"],
-            mat_var.node_tree.nodes["Principled BSDF"].inputs["Base Color"]
-        )
-        print("  Variance cloud: vertex colours applied")
-    except Exception as e:
-        print(f"  Variance vertex colours: {{e}}")
+            mat_var.node_tree.nodes["Principled BSDF"].inputs["Base Color"])
+    except Exception:
+        pass
 
 # ── Grasp spheres ──
 for fname, gname, r, g, b, emit in [
@@ -206,20 +198,16 @@ for fname, gname, r, g, b, emit in [
 ]:
     path = os.path.join(BASE, fname)
     if not os.path.exists(path):
-        print(f"  No {{fname}} — skipping")
         continue
     print(f"  Loading: {{fname}} ...")
-    try:
-        bpy.ops.import_mesh.ply(filepath=path)
-    except AttributeError:
-        bpy.ops.wm.ply_import(filepath=path)
+    bpy.ops.import_mesh.ply(filepath=path)
     obj = bpy.context.active_object
     if obj:
         obj.name = gname
         mat = bpy.data.materials.new(name=gname + "_mat")
         mat.use_nodes = True
         mat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (r, g, b, 1.0)
-        mat.node_tree.nodes["Principled BSDF"].inputs["Emission Color"].default_value = (r * 0.3, g * 0.3, b * 0.2, 1.0)
+        mat.node_tree.nodes["Principled BSDF"].inputs["Emission Color"].default_value = (r*0.3, g*0.3, b*0.2, 1.0)
         mat.node_tree.nodes["Principled BSDF"].inputs["Emission Strength"].default_value = emit
         obj.data.materials.append(mat)
 
@@ -229,12 +217,15 @@ bpy.context.scene.render.resolution_x = 1920
 bpy.context.scene.render.resolution_y = 1080
 bpy.context.scene.render.film_transparent = True
 
-# ── Viewport shading ──
+# ── Viewport ──
 for area in bpy.context.screen.areas:
     if area.type == 'VIEW_3D':
         area.spaces[0].shading.type = 'MATERIAL'
 
-print("\\n=== RePAIR pipeline scene ready.  F12 to render. ===")
+# ── Frame all objects ──
+bpy.ops.view3d.view_all()
+
+print(f"\\n=== {{len(bpy.data.objects)}} objects imported. Scene ready. F12 to render. ===")
 '''
 
 

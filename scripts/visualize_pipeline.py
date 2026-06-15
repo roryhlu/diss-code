@@ -120,8 +120,13 @@ def line_json(pairs, color_rgb, n=40):
 
 
 def build_html(pipeline_data: list[dict]) -> str:
-    """Generate complete self-contained HTML with Three.js."""
+    """Generate complete self-contained HTML with Three.js embedded inline."""
     stages_json = json.dumps(pipeline_data, separators=(',', ':'))
+
+    # Read local libraries (no CDN — works offline from file://)
+    lib_dir = Path(__file__).resolve().parent
+    three_js = (lib_dir / "three.min.js").read_text()
+    orbit_js = (lib_dir / "OrbitControls.js").read_text()
 
     return f'''<!DOCTYPE html>
 <html lang="en">
@@ -157,18 +162,17 @@ body{{background:#1a1a2e;color:#eee;font-family:system-ui;overflow:hidden}}
 </div>
 <div id="view3d"></div>
 
-<script src="https://unpkg.com/three@0.157.0/build/three.min.js"></script>
-<script src="https://unpkg.com/three@0.157.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+// Three.js r128 — embedded inline (works offline)
+{three_js}
+</script>
+<script>
+// OrbitControls — embedded inline
+{orbit_js}
+</script>
 
 <script>
 const STAGES = {stages_json};
-
-if (!window.THREE) {{
-    document.getElementById('view3d').innerHTML = '<div style=\"color:white;font-size:20px;text-align:center;margin-top:40vh\"><b>Three.js failed to load</b><br><small>Check internet connection for CDN.</small></div>';
-    throw new Error('THREE not loaded');
-}}
-
-const THREE = window.THREE;
 const SPACING = 0.06;
 let mode = 'overlay'; // 'overlay' | 'side'
 
@@ -423,6 +427,14 @@ def run_pipeline(args):
     output.write_text(html, encoding="utf-8")
     print(f"Done → {output}")
 
+    # Serve hint — file:// protocol blocks CDN scripts
+    import shutil
+    port = 8765
+    print(f"\n  If the page is blank, run this in a NEW terminal:")
+    print(f"    python3 -m http.server {port} --directory {output.parent.resolve()}")
+    print(f"  Then open: http://localhost:{port}/{output.name}")
+    print(f"\n  Or auto-open with: --serve")
+
 
 # ── Simulation mode ──────────────────────────────────────────────────
 
@@ -491,6 +503,7 @@ def parse_args():
     p.add_argument("--max-translation", type=float, default=0.03)
     p.add_argument("--mu", type=float, default=0.5)
     p.add_argument("--mc-passes", type=int, default=30)
+    p.add_argument("--serve", action="store_true", help="Auto-serve HTML via local server + open browser")
     return p.parse_args()
 
 

@@ -138,7 +138,7 @@ body{{background:#1a1a2e;color:#eee;font-family:system-ui;overflow:hidden}}
 #panel input{{margin-right:6px;accent-color:#e94560}}
 #panel button{{display:block;width:100%;margin:3px 0;padding:6px;background:#0f3460;color:#eee;border:none;border-radius:4px;cursor:pointer;font-size:12px}}
 #panel button:hover{{background:#e94560}}
-#panel button.active{{background:#e94560}}
+#panel button.cam-active{{background:#e94560}}
 #view3d{{width:100vw;height:100vh}}
 </style>
 </head>
@@ -148,11 +148,11 @@ body{{background:#1a1a2e;color:#eee;font-family:system-ui;overflow:hidden}}
 <div id="toggles"></div>
 <div style="margin-top:8px;border-top:1px solid #333;padding-top:8px">
 <b style="font-size:12px">Camera</b>
-<button onclick="setView('top')">Top-Down</button>
-<button onclick="setView('front')">Front</button>
-<button onclick="setView('side')">Side</button>
-<button onclick="setView('iso')">Isometric</button>
-<button id="btn-overlay" class="active" onclick="toggleMode()">Overlay</button>
+<button id="btn-top" class="active">Top-Down</button>
+<button id="btn-front">Front</button>
+<button id="btn-side">Side</button>
+<button id="btn-iso">Isometric</button>
+<button id="btn-overlay" class="active">Overlay</button>
 </div>
 </div>
 <div id="view3d"></div>
@@ -175,7 +175,7 @@ const container = document.getElementById('view3d');
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1a1a2e);
 const camera = new THREE.PerspectiveCamera(50, container.clientWidth/container.clientHeight, 0.0001, 1000);
-camera.position.set(0, 0, 0.15);
+camera.position.set(0, 0, 0.30);
 camera.lookAt(0, 0, 0);
 
 const renderer = new THREE.WebGLRenderer({{antialias:true}});
@@ -243,17 +243,22 @@ STAGES.forEach((sd, idx) => {{
 }});
 
 function setView(dir) {{
-    const d = 0.20;
+    const d = 0.30;
     if (dir==='top') {{ camera.position.set(0,0,d); controls.target.set(0,0,0); }}
     else if (dir==='front') {{ camera.position.set(0,-d,0); controls.target.set(0,0,0); }}
     else if (dir==='side') {{ camera.position.set(d,0,0); controls.target.set(0,0,0); }}
     else {{ camera.position.set(d*0.7,-d*0.7,d*0.5); controls.target.set(0,0,0); }}
     controls.update();
-    document.querySelectorAll('#panel button.active').forEach(b=>b.classList.remove('active'));
-    event.target.classList.add('active');
+    document.querySelectorAll('#panel button.cam-active').forEach(b=>b.classList.remove('cam-active'));
+    document.getElementById('btn-'+dir).classList.add('cam-active');
 }}
 
-document.querySelector('#panel button:first-of-type').classList.add('active');  // top-down default
+// Wire up camera buttons (module scope — use addEventListener, not onclick)
+document.getElementById('btn-top').addEventListener('click', () => setView('top'));
+document.getElementById('btn-front').addEventListener('click', () => setView('front'));
+document.getElementById('btn-side').addEventListener('click', () => setView('side'));
+document.getElementById('btn-iso').addEventListener('click', () => setView('iso'));
+document.getElementById('btn-overlay').addEventListener('click', toggleMode);
 
 function toggleMode() {{
     mode = mode === 'overlay' ? 'side' : 'overlay';
@@ -337,7 +342,7 @@ def run_pipeline(args):
 
     # ── MC Dropout ──
     geo_mean = ds.copy()
-    var_colors_u8 = np.full((len(ds),3), [128,128,128], np.uint8)
+    var_colors_u8 = np.full((len(ds),3), [255,100,50], np.uint8)  # orange-red placeholder
     if not args.quick and args.model and Path(args.model).exists():
         from uncertainty.geotransformer import GeoTransformer
         from uncertainty.mc_inference import run_mc_passes
@@ -387,8 +392,8 @@ def run_pipeline(args):
         {'name':'05_TEASER_Aligned','size':0.005,  'offset_x':0, **points_to_json(aligned, np.full((len(aligned),3),[0,230,60],np.uint8))},
         {'name':'06_GeoTransformer','size':0.005,  'offset_x':0, **points_to_json(geo_mean, np.full((len(geo_mean),3),[0,200,220],np.uint8))},
         {'name':'07_Variance',      'size':0.005,  'offset_x':0, **points_to_json(ds, var_colors_u8)},
-        {'name':'08_Grasps_Pass',   'size':0.008,  'offset_x':0, **sphere_json([c for (c,_) in acc]+[c for (_,c) in acc], [0,255,50], 0.005)},
-        {'name':'09_Grasps_Fail',   'size':0.006,  'offset_x':0, **sphere_json([c for (c,_) in rej[:6]]+[c for (_,c) in rej[:6]], [255,30,30], 0.004)},
+        {'name':'08_Grasps_Pass',   'size':0.015,  'offset_x':0, **sphere_json([c for (c,_) in acc]+[c for (_,c) in acc], [0,255,50], 0.010)},
+        {'name':'09_Grasps_Fail',   'size':0.012,  'offset_x':0, **sphere_json([c for (c,_) in rej[:6]]+[c for (_,c) in rej[:6]], [255,30,30], 0.008)},
     ]
     # Add grasp axis lines as extra entries with sphere data layered on same offset
     if acc:

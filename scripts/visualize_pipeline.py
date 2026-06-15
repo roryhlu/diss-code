@@ -158,13 +158,18 @@ body{{background:#1a1a2e;color:#eee;font-family:system-ui;overflow:hidden}}
 <div id="view3d"></div>
 
 <script type="importmap">
-{{"imports":{{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-"OrbitControls":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/OrbitControls.js"}}}}
+{{"imports":{{"three":"https://unpkg.com/three@0.157.0/build/three.module.js",
+"OrbitControls":"https://unpkg.com/three@0.157.0/examples/jsm/controls/OrbitControls.js"}}}}
 </script>
 
 <script type="module">
 import * as THREE from 'three';
 import {{OrbitControls}} from 'OrbitControls';
+
+// Error display — shows if CDN or JS fails
+window.onerror = (msg) => {{
+    document.getElementById('view3d').innerHTML = '<div style="color:white;font-size:20px;text-align:center;margin-top:40vh"><b>Error</b><br>'+msg+'<br><br><small>Check internet (Three.js loads from CDN) or try Chrome/Edge.</small></div>';
+}};
 
 const STAGES = {stages_json};
 const SPACING = 0.06;

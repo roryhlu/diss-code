@@ -228,7 +228,7 @@ for area in bpy.context.screen.areas:
         area.spaces[0].shading.type = 'MATERIAL'
         for region in area.regions:
             if region.type == 'WINDOW':
-                _ov = {'area': area, 'region': region}
+                _ov = {{'area': area, 'region': region}}
                 break
         break
 

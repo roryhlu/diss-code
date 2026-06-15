@@ -109,7 +109,8 @@ def generate_blender_script(
 import bpy, os
 from math import radians
 
-BASE = r"{output_dir.resolve()}"
+BASE = os.path.dirname(os.path.abspath(__file__))  # auto-detect — works on Windows/Linux
+print(f"BASE: {{BASE}}")
 
 # ── Clear default scene ──
 bpy.ops.object.select_all(action='SELECT')

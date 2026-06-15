@@ -104,10 +104,7 @@ def generate_blender_script(
 ) -> str:
     """Generate a standalone Blender Python script that loads and renders everything."""
     return f'''
-"""RePAIR Pipeline Visualisation — run in Blender Scripting workspace.
-
-Prerequisite: Edit → Preferences → Add-ons → enable 'Import-Export: Stanford PLY format'
-"""
+"""RePAIR Pipeline Visualisation — run in Blender Scripting workspace."""
 
 import bpy, os
 from math import radians
@@ -118,17 +115,26 @@ BASE = r"{output_dir.resolve()}"
 bpy.ops.object.select_all(action='SELECT')
 bpy.ops.object.delete()
 
-# ── Import an ASCII PLY file ──
+# ── Import an ASCII PLY file (Blender 3.x to 4.x compatible) ──
 def import_ply(filename, obj_name):
     path = os.path.join(BASE, filename)
     if not os.path.exists(path):
-        print(f"  MISSING: {{filename}}  ({{path}})")
+        print(f"  MISSING: {{filename}}")
         return None
     print(f"  Loading: {{filename}} ...")
-    bpy.ops.import_mesh.ply(filepath=path)
+    # Try Blender 4.0+ import_mesh.ply first, then 3.x wm.ply_import
+    for op in [bpy.ops.import_mesh.ply, bpy.ops.wm.ply_import]:
+        try:
+            op(filepath=path)
+            break
+        except (AttributeError, RuntimeError):
+            continue
+    else:
+        print(f"  FAILED: no PLY importer available. Check Blender version.")
+        return None
     obj = bpy.context.active_object
     if obj is None:
-        print(f"  FAILED: {{filename}} — no object created. Is the PLY addon enabled?")
+        print(f"  FAILED: {{filename}} — no object created")
         return None
     obj.name = obj_name
     print(f"    -> {{len(obj.data.vertices)}} vertices")
@@ -199,9 +205,7 @@ for fname, gname, r, g, b, emit in [
     path = os.path.join(BASE, fname)
     if not os.path.exists(path):
         continue
-    print(f"  Loading: {{fname}} ...")
-    bpy.ops.import_mesh.ply(filepath=path)
-    obj = bpy.context.active_object
+    obj = import_ply(fname, gname)
     if obj:
         obj.name = gname
         mat = bpy.data.materials.new(name=gname + "_mat")

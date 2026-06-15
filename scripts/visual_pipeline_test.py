@@ -218,12 +218,22 @@ bpy.context.scene.render.resolution_y = 1080
 bpy.context.scene.render.film_transparent = True
 
 # ── Viewport ──
+_ov = None
 for area in bpy.context.screen.areas:
     if area.type == 'VIEW_3D':
         area.spaces[0].shading.type = 'MATERIAL'
+        for region in area.regions:
+            if region.type == 'WINDOW':
+                _ov = {'area': area, 'region': region}
+                break
+        break
 
 # ── Frame all objects ──
-bpy.ops.view3d.view_all()
+if _ov:
+    with bpy.context.temp_override(**_ov):
+        bpy.ops.view3d.view_all()
+else:
+    print("  (no 3D viewport found — open a 3D Viewport tab to see the scene)")
 
 print(f"\\n=== {{len(bpy.data.objects)}} objects imported. Scene ready. F12 to render. ===")
 '''

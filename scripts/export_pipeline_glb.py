@@ -167,6 +167,7 @@ def write_glb(output_path: str, meshes: list[dict]) -> None:
     bin_data = bytearray()
     byte_offset = 0
     material_cache = {}
+    material_indices = {}
 
     for m_idx, m in enumerate(meshes):
         pts = m['points'].astype(np.float32)
@@ -177,6 +178,11 @@ def write_glb(output_path: str, meshes: list[dict]) -> None:
         n = len(pts)
         if n == 0:
             continue
+
+        # Apply side-by-side spatial offset so stages don't overlap
+        offset_x = m.get('offset_x', 0.0)
+        pts = pts.copy()
+        pts[:, 0] += offset_x
 
         # Interleaved row: 12 bytes position + 3 bytes color + 1 pad = 16 bytes
         row = np.zeros(n, dtype=[('x','f4'),('y','f4'),('z','f4'),
@@ -202,14 +208,18 @@ def write_glb(output_path: str, meshes: list[dict]) -> None:
         bin_data.extend(row_bytes)
         byte_offset += len(row_bytes)
 
-        # Material
+        # Material with KHR_materials_unlit — bright flat colours, no lighting
         mat_key = m.get('emat','')
         if mat_key not in material_cache:
             r,g,b = m.get('material_color',[0.5,0.5,0.5])
-            mat = {"pbrMetallicRoughness":{"baseColorFactor":[r,g,b,1.0],
-                    "roughnessFactor":0.4,"metallicFactor":0.0}}
+            mat = {
+                "pbrMetallicRoughness": {"baseColorFactor":[r,g,b,1.0],
+                    "roughnessFactor":0.4,"metallicFactor":0.0},
+                "extensions": {"KHR_materials_unlit": {}},
+            }
             if m.get('emissive', None):
                 mat["emissiveFactor"] = m['emissive']
+                del mat["extensions"]  # emissive materials need lighting
             material_cache[mat_key] = len(materials)
             materials.append(mat)
 
@@ -225,6 +235,8 @@ def write_glb(output_path: str, meshes: list[dict]) -> None:
         "accessors":accessors,"bufferViews":buffer_views,
         "buffers":[{"byteLength":len(bin_data)}],
         "materials":materials,
+        "extensionsUsed":["KHR_materials_unlit"],
+        "extensionsRequired":["KHR_materials_unlit"],
     }
     js = json.dumps(gltf, separators=(',',':'))
     while len(js)%4 != 0: js += ' '
@@ -376,20 +388,20 @@ def main() -> None:
     # ── 8. Write GLB ──
     print("\n=== 8. Writing GLB ===")
     meshes = [
-        {'name':'01_OriginalMesh',      'points':raw_pts,     'colors':np.full((len(raw_pts),3),[210,180,140],dtype=np.uint8), 'material_color':[0.82,0.70,0.55], 'emat':'beige'},
-        {'name':'02_VoxelDownsampled',  'points':ds_pts,      'colors':np.full((len(ds_pts),3),[150,150,150],dtype=np.uint8),  'material_color':[0.60,0.60,0.60], 'emat':'grey'},
-        {'name':'03_PCANormals',        'points':ds_pts,      'colors':normal_rgb,                                                'material_color':[0.70,0.70,0.70], 'emat':'rgb'},
-        {'name':'04_SceneNoisy',        'points':scene_pts,   'colors':np.full((len(scene_pts),3),[50,100,255],dtype=np.uint8),  'material_color':[0.20,0.40,1.00], 'emat':'blue'},
-        {'name':'05_TEASERAligned',     'points':aligned_pts, 'colors':np.full((len(aligned_pts),3),[0,230,60],dtype=np.uint8),  'material_color':[0.00,0.90,0.24], 'emat':'green'},
-        {'name':'06_GeoMean',           'points':geo_mean,    'colors':np.full((len(geo_mean),3),[0,200,220],dtype=np.uint8),    'material_color':[0.00,0.78,0.86], 'emat':'cyan'},
-        {'name':'07_GeoVariance',       'points':ds_pts,      'colors':geo_var_colors,                                            'material_color':[0.50,0.50,0.50], 'emat':'heat'},
+        {'name':'01_ORIGINAL_MESH',      'points':raw_pts,     'colors':np.full((len(raw_pts),3),[210,180,140],dtype=np.uint8), 'material_color':[0.82,0.70,0.55], 'emat':'beige',  'offset_x':-0.24},
+        {'name':'02_VOXEL_5mm',          'points':ds_pts,      'colors':np.full((len(ds_pts),3),[150,150,150],dtype=np.uint8),  'material_color':[0.60,0.60,0.60], 'emat':'grey',   'offset_x':-0.18},
+        {'name':'03_PCA_NORMALS',        'points':ds_pts,      'colors':normal_rgb,                                                'material_color':[0.70,0.70,0.70], 'emat':'rgb',    'offset_x':-0.12},
+        {'name':'04_SCENE_NOISY',        'points':scene_pts,   'colors':np.full((len(scene_pts),3),[50,100,255],dtype=np.uint8),  'material_color':[0.20,0.40,1.00], 'emat':'blue',   'offset_x':-0.06},
+        {'name':'05_TEASER_ALIGNED',     'points':aligned_pts, 'colors':np.full((len(aligned_pts),3),[0,230,60],dtype=np.uint8),  'material_color':[0.00,0.90,0.24], 'emat':'green',  'offset_x':0.00},
+        {'name':'06_GEOTRANSFORMER_MEAN','points':geo_mean,    'colors':np.full((len(geo_mean),3),[0,200,220],dtype=np.uint8),    'material_color':[0.00,0.78,0.86], 'emat':'cyan',   'offset_x':0.06},
+        {'name':'07_VARIANCE_HEATMAP',   'points':ds_pts,      'colors':geo_var_colors,                                            'material_color':[0.50,0.50,0.50], 'emat':'heat',   'offset_x':0.12},
     ]
     if grasp_ok_pts:
-        meshes.append({'name':'08_GraspsPassed', 'points':np.vstack(grasp_ok_pts), 'colors':np.vstack(grasp_ok_cols),
-                       'material_color':[0.0,1.0,0.2], 'emissive':[0.0,0.5,0.1], 'emat':'ok'})
+        meshes.append({'name':'08_GRASPS_PASSED', 'points':np.vstack(grasp_ok_pts), 'colors':np.vstack(grasp_ok_cols),
+                       'material_color':[0.0,1.0,0.2], 'emissive':[0.0,0.5,0.1], 'emat':'ok', 'offset_x':0.18})
     if grasp_fail_pts:
-        meshes.append({'name':'09_GraspsFailed', 'points':np.vstack(grasp_fail_pts), 'colors':np.vstack(grasp_fail_cols),
-                       'material_color':[1.0,0.0,0.0], 'emissive':[0.5,0.0,0.0], 'emat':'fail'})
+        meshes.append({'name':'09_GRASPS_FAILED', 'points':np.vstack(grasp_fail_pts), 'colors':np.vstack(grasp_fail_cols),
+                       'material_color':[1.0,0.0,0.0], 'emissive':[0.5,0.0,0.0], 'emat':'fail', 'offset_x':0.24})
 
     glb_path = output_dir / "repair_pipeline.glb"
     write_glb(str(glb_path), meshes)

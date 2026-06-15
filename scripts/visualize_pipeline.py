@@ -174,8 +174,8 @@ let mode = 'overlay'; // 'overlay' | 'side'
 const container = document.getElementById('view3d');
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1a1a2e);
-const camera = new THREE.PerspectiveCamera(50, container.clientWidth/container.clientHeight, 0.001, 10);
-camera.position.set(0, -0.08, 0.06);
+const camera = new THREE.PerspectiveCamera(50, container.clientWidth/container.clientHeight, 0.0001, 1000);
+camera.position.set(0, 0, 0.15);
 camera.lookAt(0, 0, 0);
 
 const renderer = new THREE.WebGLRenderer({{antialias:true}});
@@ -184,6 +184,9 @@ container.appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0,0,0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.1;
+controls.zoomSpeed = 1.5;
 controls.update();
 
 // Lights
@@ -221,7 +224,7 @@ STAGES.forEach((sd, idx) => {{
         }}
         geom.setAttribute('position', new THREE.BufferAttribute(pos,3));
         geom.setAttribute('color', new THREE.BufferAttribute(col,3));
-        const mat = new THREE.PointsMaterial({{size:sd.size||0.001, vertexColors:true, sizeAttenuation:true}});
+        const mat = new THREE.PointsMaterial({{size:sd.size||0.005, vertexColors:true, sizeAttenuation:true}});
         g.add(new THREE.Points(geom, mat));
     }}
 
@@ -240,11 +243,11 @@ STAGES.forEach((sd, idx) => {{
 }});
 
 function setView(dir) {{
-    const d = 0.10;
+    const d = 0.20;
     if (dir==='top') {{ camera.position.set(0,0,d); controls.target.set(0,0,0); }}
     else if (dir==='front') {{ camera.position.set(0,-d,0); controls.target.set(0,0,0); }}
     else if (dir==='side') {{ camera.position.set(d,0,0); controls.target.set(0,0,0); }}
-    else {{ camera.position.set(d,-d,d*0.7); controls.target.set(0,0,0); }}
+    else {{ camera.position.set(d*0.7,-d*0.7,d*0.5); controls.target.set(0,0,0); }}
     controls.update();
     document.querySelectorAll('#panel button.active').forEach(b=>b.classList.remove('active'));
     event.target.classList.add('active');
@@ -281,9 +284,8 @@ window.addEventListener('resize', () => {{
     renderer.setSize(container.clientWidth, container.clientHeight);
 }});
 
-// Top-down by default
-setView('top');
-document.querySelector('#panel button:first-of-type').classList.add('active');
+// Top-down view on load
+window.addEventListener('DOMContentLoaded', () => {{ setView('top'); }});
 </script>
 </body>
 </html>'''
@@ -311,6 +313,7 @@ def run_pipeline(args):
         pcd = o3d.io.read_point_cloud(args.fragment)
         raw = np.asarray(pcd.points, np.float64)
     cent = raw.mean(axis=0); raw -= cent
+    print(f"  {len(raw):,} points, centred, extent={raw.max(axis=0)-raw.min(axis=0)}")
 
     # ── Voxel ──
     ds = voxel_ds(raw, 0.005)
@@ -377,15 +380,15 @@ def run_pipeline(args):
 
     # ── Build JSON data for each stage ──
     pipeline_data = [
-        {'name':'01_Original',      'size':0.0006, 'offset_x':0, **points_to_json(raw, np.full((len(raw),3),[210,180,140],np.uint8))},
-        {'name':'02_Voxel',         'size':0.0012, 'offset_x':0, **points_to_json(ds,  np.full((len(ds),3),[150,150,150],np.uint8))},
-        {'name':'03_PCA_Normals',   'size':0.0012, 'offset_x':0, **points_to_json(ds,  normal_rgb)},
-        {'name':'04_Scene_Noisy',   'size':0.0012, 'offset_x':0, **points_to_json(scene, np.full((len(scene),3),[50,100,255],np.uint8))},
-        {'name':'05_TEASER_Aligned','size':0.0012, 'offset_x':0, **points_to_json(aligned, np.full((len(aligned),3),[0,230,60],np.uint8))},
-        {'name':'06_GeoTransformer','size':0.0012, 'offset_x':0, **points_to_json(geo_mean, np.full((len(geo_mean),3),[0,200,220],np.uint8))},
-        {'name':'07_Variance',      'size':0.0012, 'offset_x':0, **points_to_json(ds, var_colors_u8)},
-        {'name':'08_Grasps_Pass',   'size':0.002,  'offset_x':0, **sphere_json([c for (c,_) in acc]+[c for (_,c) in acc], [0,255,50], 0.005)},
-        {'name':'09_Grasps_Fail',   'size':0.0015, 'offset_x':0, **sphere_json([c for (c,_) in rej[:6]]+[c for (_,c) in rej[:6]], [255,30,30], 0.004)},
+        {'name':'01_Original',      'size':0.003,  'offset_x':0, **points_to_json(raw, np.full((len(raw),3),[210,180,140],np.uint8))},
+        {'name':'02_Voxel',         'size':0.005,  'offset_x':0, **points_to_json(ds,  np.full((len(ds),3),[150,150,150],np.uint8))},
+        {'name':'03_PCA_Normals',   'size':0.005,  'offset_x':0, **points_to_json(ds,  normal_rgb)},
+        {'name':'04_Scene_Noisy',   'size':0.005,  'offset_x':0, **points_to_json(scene, np.full((len(scene),3),[50,100,255],np.uint8))},
+        {'name':'05_TEASER_Aligned','size':0.005,  'offset_x':0, **points_to_json(aligned, np.full((len(aligned),3),[0,230,60],np.uint8))},
+        {'name':'06_GeoTransformer','size':0.005,  'offset_x':0, **points_to_json(geo_mean, np.full((len(geo_mean),3),[0,200,220],np.uint8))},
+        {'name':'07_Variance',      'size':0.005,  'offset_x':0, **points_to_json(ds, var_colors_u8)},
+        {'name':'08_Grasps_Pass',   'size':0.008,  'offset_x':0, **sphere_json([c for (c,_) in acc]+[c for (_,c) in acc], [0,255,50], 0.005)},
+        {'name':'09_Grasps_Fail',   'size':0.006,  'offset_x':0, **sphere_json([c for (c,_) in rej[:6]]+[c for (_,c) in rej[:6]], [255,30,30], 0.004)},
     ]
     # Add grasp axis lines as extra entries with sphere data layered on same offset
     if acc:
@@ -441,13 +444,13 @@ def run_simulation(args):
     cone_pts = np.vstack(cone)
 
     sim_data = [
-        {'name':'Table',     'size':0.0012, 'offset_x':0, **points_to_json(table, np.full((len(table),3),[80,80,90],np.uint8))},
-        {'name':'Fragment',  'size':0.001,  'offset_x':0, **points_to_json(frag,  np.full((len(frag),3),[210,180,140],np.uint8))},
-        {'name':'Approach',  'size':0.002,  'offset_x':0, **points_to_json(arrow, np.full((len(arrow),3),[255,200,50],np.uint8))},
-        {'name':'Camera_FOV','size':0.001,  'offset_x':0, **points_to_json(cone_pts, np.full((len(cone_pts),3),[100,180,255],np.uint8))},
-        {'name':'Pre_Grasp', 'size':0.003,  'offset_x':0, **sphere_json([pre], [0,255,80], 0.008)},
-        {'name':'Grasp_Pt',  'size':0.003,  'offset_x':0, **sphere_json([grasp], [255,40,40], 0.008)},
-        {'name':'Camera',    'size':0.003,  'offset_x':0, **sphere_json([cam], [0,220,255], 0.006)},
+        {'name':'Table',     'size':0.005, 'offset_x':0, **points_to_json(table, np.full((len(table),3),[80,80,90],np.uint8))},
+        {'name':'Fragment',  'size':0.004, 'offset_x':0, **points_to_json(frag,  np.full((len(frag),3),[210,180,140],np.uint8))},
+        {'name':'Approach',  'size':0.006, 'offset_x':0, **points_to_json(arrow, np.full((len(arrow),3),[255,200,50],np.uint8))},
+        {'name':'Camera_FOV','size':0.004, 'offset_x':0, **points_to_json(cone_pts, np.full((len(cone_pts),3),[100,180,255],np.uint8))},
+        {'name':'Pre_Grasp', 'size':0.012, 'offset_x':0, **sphere_json([pre], [0,255,80], 0.008)},
+        {'name':'Grasp_Pt',  'size':0.012, 'offset_x':0, **sphere_json([grasp], [255,40,40], 0.008)},
+        {'name':'Camera',    'size':0.012, 'offset_x':0, **sphere_json([cam], [0,220,255], 0.006)},
     ]
 
     html = build_html(sim_data)

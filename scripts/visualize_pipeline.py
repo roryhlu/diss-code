@@ -157,21 +157,18 @@ body{{background:#1a1a2e;color:#eee;font-family:system-ui;overflow:hidden}}
 </div>
 <div id="view3d"></div>
 
-<script type="importmap">
-{{"imports":{{"three":"https://unpkg.com/three@0.157.0/build/three.module.js",
-"OrbitControls":"https://unpkg.com/three@0.157.0/examples/jsm/controls/OrbitControls.js"}}}}
-</script>
+<script src="https://unpkg.com/three@0.157.0/build/three.min.js"></script>
+<script src="https://unpkg.com/three@0.157.0/examples/js/controls/OrbitControls.js"></script>
 
-<script type="module">
-import * as THREE from 'three';
-import {{OrbitControls}} from 'OrbitControls';
-
-// Error display — shows if CDN or JS fails
-window.onerror = (msg) => {{
-    document.getElementById('view3d').innerHTML = '<div style="color:white;font-size:20px;text-align:center;margin-top:40vh"><b>Error</b><br>'+msg+'<br><br><small>Check internet (Three.js loads from CDN) or try Chrome/Edge.</small></div>';
-}};
-
+<script>
 const STAGES = {stages_json};
+
+if (!window.THREE) {{
+    document.getElementById('view3d').innerHTML = '<div style=\"color:white;font-size:20px;text-align:center;margin-top:40vh\"><b>Three.js failed to load</b><br><small>Check internet connection for CDN.</small></div>';
+    throw new Error('THREE not loaded');
+}}
+
+const THREE = window.THREE;
 const SPACING = 0.06;
 let mode = 'overlay'; // 'overlay' | 'side'
 
@@ -187,7 +184,7 @@ const renderer = new THREE.WebGLRenderer({{antialias:true}});
 renderer.setSize(container.clientWidth, container.clientHeight);
 container.appendChild(renderer.domElement);
 
-const controls = new OrbitControls(camera, renderer.domElement);
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
 controls.target.set(0,0,0);
 controls.enableDamping = true;
 controls.dampingFactor = 0.1;

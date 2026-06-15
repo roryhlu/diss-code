@@ -259,8 +259,7 @@ def main() -> None:
         grasp_fail_col.append(np.full((60,3),[200,30,30],np.uint8))
 
     # ── Side-by-side offsets ──
-    # Each stage shifted 0.07m in X so they don't overlap.
-    SPACING = 0.07
+    SPACING = 0.30
 
     # ── 8. Write PLY files ──
     print("\n=== 8. Writing coloured PLY files ===")
@@ -278,41 +277,55 @@ def main() -> None:
         pts_offset = pts.copy()
         pts_offset[:, 0] += idx * SPACING
         write_ply_ascii(str(output_dir / name), pts_offset, cols)
-        print(f"  {name}")
+        print(f"  {name}  — X range [{pts_offset[:,0].min():.3f}, {pts_offset[:,0].max():.3f}]")
 
     if grasp_ok_pts:
         go = np.vstack(grasp_ok_pts); go[:,0] += 7*SPACING
         write_ply_ascii(str(output_dir / "08_grasps_pass.ply"), go, np.vstack(grasp_ok_col))
-        print(f"  08_grasps_pass.ply")
+        print(f"  08_grasps_pass.ply  — X range [{go[:,0].min():.3f}, {go[:,0].max():.3f}]")
     if grasp_fail_pts:
         gf = np.vstack(grasp_fail_pts); gf[:,0] += 8*SPACING
         write_ply_ascii(str(output_dir / "09_grasps_fail.ply"), gf, np.vstack(grasp_fail_col))
-        print(f"  09_grasps_fail.ply")
+        print(f"  09_grasps_fail.ply  — X range [{gf[:,0].min():.3f}, {gf[:,0].max():.3f}]")
 
-    # ── README ──
+    # ── README + Blender helper ──
+    apply_script = '''"""Run once in Blender to activate vertex colours on all imported meshes."""
+import bpy
+for obj in bpy.data.objects:
+    if obj.type == 'MESH' and obj.data.color_attributes:
+        mat = bpy.data.materials.new(obj.name + '_mat')
+        mat.use_nodes = True
+        attr_node = mat.node_tree.nodes.new('ShaderNodeVertexColor')
+        mat.node_tree.links.new(
+            attr_node.outputs['Color'],
+            mat.node_tree.nodes['Principled BSDF'].inputs['Base Color'])
+        obj.data.materials.append(mat)
+for area in bpy.context.screen.areas:
+    if area.type == 'VIEW_3D':
+        area.spaces[0].shading.type = 'MATERIAL'
+print('Colours applied. Press Numpad 7 for top-down view.')
+'''
+    (output_dir / "apply_colors.py").write_text(apply_script)
+
     readme = f"""REPAIR PIPELINE VISUALISATION — 9 stage files
 
 Blender instructions:
   1. File → Import → Stanford PLY (.ply)
-  2. Import each file listed below
-  3. Press Numpad 7 for TOP-DOWN view
-  4. Press Numpad 1 for FRONT view  
-  5. Press Numpad 3 for SIDE view
-  6. Outliner (top-right panel) shows all 9 objects by name
-  7. Click the eye icon to toggle visibility per object
+  2. Select ALL .ply files and import at once
+  3. Scripting workspace → Open → apply_colors.py → Run
+  4. Press Numpad 7 for TOP-DOWN view
+  5. Press Numpad 1 for FRONT view
 
-Files and colours:
-  01_original.ply          BEIGE   — raw OBJ mesh ({len(raw_pts):,} verts)
-  02_voxel_5mm.ply         GREY    — 5mm voxel grid ({len(ds_pts):,} pts)
-  03_pca_normals.ply       RAINBOW — PCA normals as RGB ({len(ds_pts):,} pts)
+Files (spread left-to-right, 0.30m apart):
+  01_original.ply          BEIGE   — raw OBJ ({len(raw_pts):,} verts)
+  02_voxel_5mm.ply         GREY    — 5mm voxel ({len(ds_pts):,} pts)
+  03_pca_normals.ply       RAINBOW — PCA normals as RGB
   04_scene_noisy.ply       BLUE    — random SE(3) perturbation
-  05_teaser_aligned.ply    GREEN   — TEASER++ registration result
-  06_geotransformer.ply    CYAN    — GeoTransformer predicted surface
-  07_variance.ply          HEATMAP — epistemic uncertainty (blue=low, red=high)
-  08_grasps_pass.ply       GREEN   — CVaR accepted grasp spheres + axis
-  09_grasps_fail.ply       RED     — CVaR rejected grasp spheres + axis
-
-Each file is offset along X by 0.07m so stages don't overlap.
+  05_teaser_aligned.ply    GREEN   — TEASER++ result
+  06_geotransformer.ply    CYAN    — MC Dropout predicted surface
+  07_variance.ply          HEATMAP — epistemic uncertainty (blue=low,red=high)
+  08_grasps_pass.ply       GREEN   — CVaR accepted (large spheres+axis)
+  09_grasps_fail.ply       RED     — CVaR rejected (large spheres+axis)
 """
     (output_dir / "README.txt").write_text(readme)
 

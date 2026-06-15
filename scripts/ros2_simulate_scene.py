@@ -43,7 +43,7 @@ def write_ply_ascii(path: str, points: np.ndarray, colours: np.ndarray) -> None:
                     f"{cls[i,0]} {cls[i,1]} {cls[i,2]}\n")
 
 
-def make_table(width=0.4, depth=0.3, z=0.0, n_points=8000):
+def make_table(width=0.8, depth=0.6, z=0.0, n_points=8000):
     rng = np.random.default_rng(0)
     x = rng.uniform(-width/2, width/2, n_points)
     y = rng.uniform(-depth/2, depth/2, n_points)
@@ -107,9 +107,9 @@ def main():
     table_z = -0.002
     table = make_table(z=table_z) + np.array([frag_center[0], frag_center[1], 0])
 
-    pre_grasp = np.array([frag_center[0], frag_center[1], 0.08])
+    pre_grasp = np.array([frag_center[0], frag_center[1], 0.15])
     grasp_pos = np.array([frag_center[0], frag_center[1], frag[:,2].max() + 0.005])
-    camera_pos = np.array([frag_center[0], frag_center[1], 0.30])
+    camera_pos = np.array([frag_center[0], frag_center[1], 0.45])
 
     # Build line for approach arrow (pre-grasp → grasp)
     t = np.linspace(0, 1, 100)
@@ -118,7 +118,7 @@ def main():
     arrow_dir = grasp_pos - pre_grasp; arrow_dir /= np.linalg.norm(arrow_dir)
 
     # Cone lines from camera to fragment
-    cone = make_cone_lines(camera_pos, grasp_pos, radius=0.05)
+    cone = make_cone_lines(camera_pos, grasp_pos, radius=0.10)
 
     # Write files
     print("\n=== Writing PLY files ===")
@@ -154,27 +154,40 @@ def main():
                     np.full((1,3), [255,40,40], np.uint8))
     print("  06_grasp_point.ply — red grasp contact point")
 
+    (output_dir / "apply_colors.py").write_text('''"""Run once in Blender to activate vertex colours."""
+import bpy
+for obj in bpy.data.objects:
+    if obj.type == 'MESH' and obj.data.color_attributes:
+        mat = bpy.data.materials.new(obj.name + '_mat')
+        mat.use_nodes = True
+        attr = mat.node_tree.nodes.new('ShaderNodeVertexColor')
+        mat.node_tree.links.new(
+            attr.outputs['Color'],
+            mat.node_tree.nodes['Principled BSDF'].inputs['Base Color'])
+        obj.data.materials.append(mat)
+for area in bpy.context.screen.areas:
+    if area.type == 'VIEW_3D':
+        area.spaces[0].shading.type = 'MATERIAL'
+print('Colours applied.')
+''')
+
     (output_dir / "README.txt").write_text("""ROBOT SIMULATION SCENE
 
-Blender: File → Import → Stanford PLY → import all 7 files
-Press Numpad 7 for TOP-DOWN view (camera looking down at table)
-Press Numpad 1 for FRONT view
-Press Numpad 3 for SIDE view
+Blender:
+  1. File → Import → Stanford PLY → select all 7 files
+  2. Scripting workspace → Open → apply_colors.py → Run
+  3. Press Numpad 7 for TOP-DOWN view (camera looking at table)
 
-Scene layout (top-down):
-  ┌─────────────────────────┐
-  │     grey table          │
-  │   ┌───────────┐         │
-  │   │  beige    │         │  ← fragment on table
-  │   │ fragment  │         │
-  │   │   ● red   │         │  ← grasp point
-  │   │   │ green │         │  ← pre-grasp (above)
-  │   └───────────┘         │
-  │          ┌ cyan         │  ← camera (30cm up)
-  └─────────────────────────┘
+Scene:
+  00_table.ply          — dark grey table (0.8 x 0.6 m)
+  01_fragment.ply       — beige fragment seated on table
+  02_camera.ply         — cyan camera position (45 cm above table)
+  03_camera_cone.ply    — blue FOV cone from camera to fragment
+  04_pre_grasp.ply      — green point (15 cm above, where robot starts descent)
+  05_approach_arrow.ply — yellow line (top-down approach path)
+  06_grasp_point.ply    — red point (contact position on fragment)
 
-The yellow arrow shows the robot approach direction (top-down).
-The blue cone shows the camera field of view.
+The robot grasps from above — the yellow arrow is the approach direction.
 """)
 
     print(f"\n{'='*60}")

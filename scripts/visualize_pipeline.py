@@ -76,7 +76,7 @@ def pca_normals(pts, k=30):
 # ── Three.js HTML generator ──────────────────────────────────────────
 
 
-def points_to_json(pts, cols, max_n=30000):
+def points_to_json(pts, cols, max_n=5000):
     """Convert points + colours to JSON-serialisable arrays, downsampling if needed."""
     if len(pts) > max_n:
         idx = np.random.default_rng(0).choice(len(pts), max_n, replace=False)
@@ -104,7 +104,7 @@ def sphere_json(centers, color_rgb, radius=0.006, n=300):
     if not all_pts: return {'x':[0],'y':[0],'z':[0],'cr':[0],'cg':[0],'cb':[0]}
     pts = np.vstack(all_pts)
     cols = np.full((len(pts),3), color_rgb, np.uint8)
-    return points_to_json(pts, cols, max_n=99999)  # keep all sphere points
+    return points_to_json(pts, cols, max_n=9999)  # keep all sphere points but limit elsewhere
 
 
 def line_json(pairs, color_rgb, n=40):
@@ -427,13 +427,11 @@ def run_pipeline(args):
     output.write_text(html, encoding="utf-8")
     print(f"Done → {output}")
 
-    # Serve hint — file:// protocol blocks CDN scripts
-    import shutil
-    port = 8765
-    print(f"\n  If the page is blank, run this in a NEW terminal:")
-    print(f"    python3 -m http.server {port} --directory {output.parent.resolve()}")
-    print(f"  Then open: http://localhost:{port}/{output.name}")
-    print(f"\n  Or auto-open with: --serve")
+    # Serve hint with quoted path (handles spaces)
+    res_path = output.parent.resolve()
+    print(f"\n  If the page is blank, open a NEW terminal and run:")
+    print(f'    python3 -m http.server 8765 --directory "{res_path}"')
+    print(f"  Then open: http://localhost:8765/{output.name}")
 
 
 # ── Simulation mode ──────────────────────────────────────────────────

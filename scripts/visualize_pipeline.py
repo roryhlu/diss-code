@@ -342,7 +342,7 @@ def run_pipeline(args):
 
     # ── MC Dropout ──
     geo_mean = ds.copy()
-    var_colors_u8 = np.full((len(ds),3), [255,100,50], np.uint8)  # orange-red placeholder
+    var_colors_u8 = np.full((len(ds),3), [255,20,147], np.uint8)  # hot pink — clearly distinct
     if not args.quick and args.model and Path(args.model).exists():
         from uncertainty.geotransformer import GeoTransformer
         from uncertainty.mc_inference import run_mc_passes
@@ -392,8 +392,8 @@ def run_pipeline(args):
         {'name':'05_TEASER_Aligned','size':0.005,  'offset_x':0, **points_to_json(aligned, np.full((len(aligned),3),[0,230,60],np.uint8))},
         {'name':'06_GeoTransformer','size':0.005,  'offset_x':0, **points_to_json(geo_mean, np.full((len(geo_mean),3),[0,200,220],np.uint8))},
         {'name':'07_Variance',      'size':0.005,  'offset_x':0, **points_to_json(ds, var_colors_u8)},
-        {'name':'08_Grasps_Pass',   'size':0.015,  'offset_x':0, **sphere_json([c for (c,_) in acc]+[c for (_,c) in acc], [0,255,50], 0.010)},
-        {'name':'09_Grasps_Fail',   'size':0.012,  'offset_x':0, **sphere_json([c for (c,_) in rej[:6]]+[c for (_,c) in rej[:6]], [255,30,30], 0.008)},
+        {'name':'08_Grasps_Pass',   'size':0.040,  'offset_x':0, **sphere_json([c for (c,_) in acc]+[c for (_,c) in acc], [0,255,50], 0.030)},
+        {'name':'09_Grasps_Fail',   'size':0.035,  'offset_x':0, **sphere_json([c for (c,_) in rej[:6]]+[c for (_,c) in rej[:6]], [255,30,30], 0.025)},
     ]
     # Add grasp axis lines as extra entries with sphere data layered on same offset
     if acc:

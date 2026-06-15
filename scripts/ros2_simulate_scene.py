@@ -82,6 +82,17 @@ def main():
     ext = Path(args.fragment).suffix.lower()
     if ext == ".obj":
         frag = load_obj(args.fragment)
+    elif ext == ".ply":
+        # Fast binary PLY reader — avoids Open3D
+        with open(args.fragment, 'rb') as fh:
+            for line in fh:
+                line = line.decode('ascii','ignore')
+                if 'element vertex' in line:
+                    n = int(line.split()[-1]); break
+            while fh.readline().strip() != b'end_header': pass
+            raw = np.frombuffer(fh.read(), dtype=np.float64)
+        stride = 6 if len(raw) % 6 == 0 else 3
+        frag = raw.reshape(-1, stride)[:,:3].astype(np.float64)
     else:
         import open3d as o3d
         frag = np.asarray(o3d.io.read_point_cloud(args.fragment).points, dtype=np.float64)

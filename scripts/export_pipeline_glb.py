@@ -192,7 +192,9 @@ def main() -> None:
     print("\n=== 6. GeoTransformer MC Dropout ===")
     geo_mean = ds_pts.copy()
     var_colors = np.full((len(ds_pts),3), [128,128,128], dtype=np.uint8)
-    if args.model and Path(args.model).exists():
+    if args.quick:
+        print("  --quick: skipping MC Dropout (grey placeholder)")
+    elif args.model and Path(args.model).exists():
         from uncertainty.geotransformer import GeoTransformer
         from uncertainty.mc_inference import run_mc_passes
         from uncertainty.pose_covariance import variance_to_rgb
@@ -212,7 +214,7 @@ def main() -> None:
         var_np = var_t.numpy()*(scl**2)
         var_colors = (variance_to_rgb(var_np)*255).astype(np.uint8)
         print(f"  σ² mean={var_np.mean():.1f}, range=[{var_np.min():.1f},{var_np.max():.1f}]")
-    else:
+    elif not args.quick:
         print("  Model not found — grey placeholder")
 
     # ── 7. CVaR grasp candidates ──
@@ -331,6 +333,8 @@ def parse_args():
     p.add_argument("--mu", type=float, default=0.5)
     p.add_argument("--mc-passes", type=int, default=30)
     p.add_argument("--dropout-rate", type=float, default=0.2)
+    p.add_argument("--quick", action="store_true",
+                   help="Skip MC Dropout (fast mode — no GPU needed)")
     return p.parse_args()
 
 

@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-RePAIR robot simulation visualisation — tabletop scene for Blender.
+RePAIR robot simulation scene — tabletop pick-and-place as coloured PLY.
 
-Generates a GLB file showing the complete pick-and-place scenario:
-  - Table plane (grey, semi-transparent suggestion)
-  - Fragment (your TEASER++ registered pose or centred mesh)
-  - Camera position (small sphere above the scene)
-  - Grasp approach vectors (arrows from pre-grasp to grasp)
-  - Grasp contact points with large coloured spheres
-  - Robot base marker
+Generates a top-down visualisation of the complete manipulation scenario:
+  - Table plane (dark grey)
+  - Fragment seated on table (beige)
+  - Camera position above and in front (cyan sphere)
+  - Camera FOV cone (wireframe lines from camera to fragment)
+  - Pre-grasp point 8 cm above fragment (green)
+  - Grasp contact point (red)
+  - Approach vector arrow (yellow, top-down)
 
-This runs WITHOUT ROS2 or MoveIt2 — pure Python, outputs one GLB
-for Blender.  Use it to validate the setup BEFORE running physical
-hardware experiments.
+All output as individual coloured ASCII PLY files — import into Blender
+via File → Import → Stanford PLY.  Top-down view: press Numpad 7.
 
 Usage
 -----
@@ -23,113 +23,54 @@ Usage
 from __future__ import annotations
 
 import argparse
-import json
-import struct
-import sys
 from pathlib import Path
 
 import numpy as np
 
 
-# ── GLB writer (inline — same as export_pipeline_glb) ───────────────
+def write_ply_ascii(path: str, points: np.ndarray, colours: np.ndarray) -> None:
+    n = len(points)
+    pts = points.astype(np.float64)
+    cls = colours.astype(np.uint8)
+    with open(path, "w") as f:
+        f.write("ply\nformat ascii 1.0\n")
+        f.write(f"element vertex {n}\n")
+        f.write("property float x\nproperty float y\nproperty float z\n")
+        f.write("property uchar red\nproperty uchar green\nproperty uchar blue\n")
+        f.write("end_header\n")
+        for i in range(n):
+            f.write(f"{pts[i,0]:.6f} {pts[i,1]:.6f} {pts[i,2]:.6f} "
+                    f"{cls[i,0]} {cls[i,1]} {cls[i,2]}\n")
 
 
-def _write_glb(path: str, meshes: list[dict]) -> None:
-    buffer_views, accessors, meshes_gltf, nodes, materials, bin_data = [], [], [], [], [], bytearray()
-    byte_offset = 0
-    mat_cache = {}
-
-    for m in meshes:
-        pts = m['points'].astype(np.float32)
-        cols = m['colors']
-        if np.issubdtype(cols.dtype, np.floating):
-            cols = np.clip(cols*255,0,255).astype(np.uint8)
-        cols = cols.astype(np.uint8)
-        n = len(pts)
-        if n == 0:
-            continue
-
-        row = np.zeros(n, dtype=[('x','f4'),('y','f4'),('z','f4'),
-                                  ('r','u1'),('g','u1'),('b','u1'),('pad','u1')])
-        row['x']=pts[:,0]; row['y']=pts[:,1]; row['z']=pts[:,2]
-        row['r']=cols[:,0]; row['g']=cols[:,1]; row['b']=cols[:,2]
-        row_bytes = row.tobytes()
-
-        acc_pos = len(accessors)
-        accessors.append({"bufferView":len(buffer_views),"componentType":5126,"count":n,
-            "type":"VEC3","max":[float(pts[:,0].max()),float(pts[:,1].max()),float(pts[:,2].max())],
-            "min":[float(pts[:,0].min()),float(pts[:,1].min()),float(pts[:,2].min())]})
-        buffer_views.append({"buffer":0,"byteOffset":byte_offset,"byteLength":len(row_bytes),
-                             "byteStride":16,"target":34962})
-        acc_col = len(accessors)
-        accessors.append({"bufferView":len(buffer_views),"componentType":5121,"count":n,
-                          "type":"VEC3","normalized":True})
-        buffer_views.append({"buffer":0,"byteOffset":byte_offset+12,"byteLength":len(row_bytes),
-                             "byteStride":16,"target":34962})
-        bin_data.extend(row_bytes); byte_offset += len(row_bytes)
-
-        mk = m.get('emat','')
-        if mk not in mat_cache:
-            r,g,b = m.get('material_color',[0.5,0.5,0.5])
-            mat = {"pbrMetallicRoughness":{"baseColorFactor":[r,g,b,1.0],
-                    "roughnessFactor":0.4,"metallicFactor":0.0},
-                   "extensions":{"KHR_materials_unlit":{}}}
-            if m.get('emissive'):
-                mat["emissiveFactor"] = m['emissive']; del mat["extensions"]
-            mat_cache[mk] = len(materials)
-            materials.append(mat)
-        mesh_idx = len(meshes_gltf)
-        meshes_gltf.append({"primitives":[{"attributes":{"POSITION":acc_pos,"COLOR_0":acc_col},
-                            "mode":0,"material":mat_cache[mk]}]})
-        nodes.append({"mesh":mesh_idx,"name":m['name']})
-
-    gltf = {"asset":{"version":"2.0","generator":"RePAIR simulation"},
-            "scene":0,"scenes":[{"nodes":list(range(len(nodes)))}],
-            "nodes":nodes,"meshes":meshes_gltf,"accessors":accessors,
-            "bufferViews":buffer_views,"buffers":[{"byteLength":len(bin_data)}],
-            "materials":materials,"extensionsUsed":["KHR_materials_unlit"],
-            "extensionsRequired":["KHR_materials_unlit"]}
-    js = json.dumps(gltf, separators=(',',':'))
-    while len(js)%4!=0: js+=' '
-    jb = js.encode('utf-8')
-    total = 12+8+len(jb)+8+len(bin_data)
-    hdr = struct.pack('<III',0x46546C67,2,total)
-    with open(path,'wb') as f:
-        f.write(hdr); f.write(struct.pack('<II',len(jb),0x4E4F534A)+jb)
-        f.write(struct.pack('<II',len(bin_data),0x004E4942)+bin_data)
-    print(f"  GLB: {path} ({total/(1024*1024):.1f} MB, {len(nodes)} meshes)")
-
-
-# ── Scene builders ───────────────────────────────────────────────────
-
-
-def make_table(width=0.4, depth=0.3, z=0.0, n=5000):
+def make_table(width=0.4, depth=0.3, z=0.0, n_points=8000):
     rng = np.random.default_rng(0)
-    x = rng.uniform(-width/2, width/2, n)
-    y = rng.uniform(-depth/2, depth/2, n)
-    z_pts = np.full(n, z)
-    return np.column_stack([x, y, z_pts])
+    x = rng.uniform(-width/2, width/2, n_points)
+    y = rng.uniform(-depth/2, depth/2, n_points)
+    return np.column_stack([x, y, np.full(n_points, z)])
 
 
-def make_arrow(start, direction, length=0.05, n=100):
-    t = np.linspace(0, 1, n)
-    points = start + t[:, None] * direction * length
-    return points
+def make_cone_lines(apex, base_center, radius=0.06, n_ring=16, n_line=50):
+    """Wireframe cone from apex to a circle at base_center."""
+    pts, cols = [], []
+    # Ring at base
+    for i in range(n_ring):
+        angle = 2*np.pi*i/n_ring
+        ring_pt = base_center + np.array([radius*np.cos(angle), radius*np.sin(angle), 0])
+        # Line from apex to ring point
+        t = np.linspace(0, 1, n_line)
+        line_pts = apex + t[:,None]*(ring_pt - apex)
+        pts.append(line_pts)
+    return np.vstack(pts)
 
 
-def load_fragment(path):
-    if Path(path).suffix.lower() == ".obj":
-        verts = []
-        with open(path, encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                if line.startswith("v "):
-                    p = line.split(); verts.append([float(p[1]), float(p[2]), float(p[3])])
-        return np.array(verts, dtype=np.float64)
-    import open3d as o3d
-    return np.asarray(o3d.io.read_point_cloud(path).points, dtype=np.float64)
-
-
-# ── Main ─────────────────────────────────────────────────────────────
+def load_obj(path):
+    verts = []
+    with open(path, encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            if line.startswith("v "):
+                p = line.split(); verts.append([float(p[1]), float(p[2]), float(p[3])])
+    return np.array(verts, dtype=np.float64)
 
 
 def main():
@@ -137,63 +78,103 @@ def main():
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load fragment
     print("=== Loading fragment ===")
-    frag_pts = load_fragment(args.fragment)
-    centroid = frag_pts.mean(axis=0)
-    frag_pts -= centroid
-    frag_z_min = frag_pts[:,2].min()
-    print(f"  {len(frag_pts):,} vertices, centred")
+    ext = Path(args.fragment).suffix.lower()
+    if ext == ".obj":
+        frag = load_obj(args.fragment)
+    else:
+        import open3d as o3d
+        frag = np.asarray(o3d.io.read_point_cloud(args.fragment).points, dtype=np.float64)
+    centroid = frag.mean(axis=0)
+    frag -= centroid
+    frag[:,2] -= frag[:,2].min()  # sit on Z=0
+    print(f"  {len(frag):,} vertices, centred, seated on table")
 
-    # Place fragment on table
-    table_z = 0.0
-    table_pts = make_table(z=table_z)
-    frag_on_table = frag_pts.copy()
-    frag_on_table[:,2] -= frag_z_min  # sit on surface
+    frag_center = frag.mean(axis=0)
 
-    # Pre-grasp and grasp poses (top-down)
-    frag_center = frag_on_table.mean(axis=0)
-    approach_z = 0.08  # 8cm above table
-    grasp_z = frag_on_table[:,2].max()  # just above fragment top
+    # Positions
+    table_z = -0.002
+    table = make_table(z=table_z) + np.array([frag_center[0], frag_center[1], 0])
 
-    pre_grasp = np.array([frag_center[0], frag_center[1], approach_z])
-    grasp_pos = np.array([frag_center[0], frag_center[1], grasp_z + 0.005])
+    pre_grasp = np.array([frag_center[0], frag_center[1], 0.08])
+    grasp_pos = np.array([frag_center[0], frag_center[1], frag[:,2].max() + 0.005])
+    camera_pos = np.array([frag_center[0], frag_center[1], 0.30])
 
-    # Camera position (above, looking down)
-    camera_pos = np.array([frag_center[0], frag_center[1] + 0.15, 0.35])
+    # Build line for approach arrow (pre-grasp → grasp)
+    t = np.linspace(0, 1, 100)
+    approach_line = pre_grasp + t[:, None] * (grasp_pos - pre_grasp)
+    # Small arrowhead at grasp end
+    arrow_dir = grasp_pos - pre_grasp; arrow_dir /= np.linalg.norm(arrow_dir)
 
-    # Build all scene elements
-    print("\n=== Building simulation scene ===")
-    meshes = [
-        {'name':'Table',       'points':table_pts,      'colors':np.full((len(table_pts),3),[100,100,110],dtype=np.uint8),  'material_color':[0.40,0.40,0.45], 'emat':'table'},
-        {'name':'Fragment',    'points':frag_on_table,   'colors':np.full((len(frag_on_table),3),[210,180,140],dtype=np.uint8),'material_color':[0.82,0.70,0.55], 'emat':'frag'},
-        {'name':'Grasp_Point', 'points':np.array([grasp_pos]),'colors':np.full((1,3),[255,50,50],dtype=np.uint8),            'material_color':[1.0,0.2,0.2],     'emat':'grasp', 'emissive':[0.5,0.0,0.0]},
-        {'name':'Pre_Grasp',   'points':np.array([pre_grasp]),'colors':np.full((1,3),[50,255,50],dtype=np.uint8),            'material_color':[0.2,1.0,0.2],     'emat':'pre',   'emissive':[0.0,0.5,0.0]},
-        {'name':'ApproachArrow', 'points':make_arrow(pre_grasp, grasp_pos-pre_grasp, length=1.0, n=200),
-         'colors':np.full((200,3),[255,200,50],dtype=np.uint8), 'material_color':[1.0,0.8,0.2], 'emat':'arrow'},
-        {'name':'Camera',      'points':np.array([camera_pos]),'colors':np.full((1,3),[0,200,255],dtype=np.uint8),            'material_color':[0.0,0.8,1.0],     'emat':'cam',   'emissive':[0.0,0.3,0.5]},
-        {'name':'CameraFOV',   'points':make_arrow(camera_pos, grasp_pos-camera_pos, length=1.0, n=100),
-         'colors':np.full((100,3),[200,200,255],dtype=np.uint8), 'material_color':[0.8,0.8,1.0], 'emat':'fov'},
-    ]
+    # Cone lines from camera to fragment
+    cone = make_cone_lines(camera_pos, grasp_pos, radius=0.05)
 
-    glb_path = output_dir / "robot_simulation.glb"
-    _write_glb(str(glb_path), meshes)
+    # Write files
+    print("\n=== Writing PLY files ===")
+
+    write_ply_ascii(str(output_dir / "00_table.ply"), table,
+                    np.full((len(table),3), [80,80,90], np.uint8))
+    print("  00_table.ply — dark grey table surface")
+
+    write_ply_ascii(str(output_dir / "01_fragment.ply"), frag,
+                    np.full((len(frag),3), [210,180,140], np.uint8))
+    print("  01_fragment.ply — beige fragment seated on table")
+
+    write_ply_ascii(str(output_dir / "02_camera.ply"),
+                    np.array([camera_pos]),
+                    np.full((1,3), [0,220,255], np.uint8))
+    print("  02_camera.ply — cyan camera position (30cm above)")
+
+    write_ply_ascii(str(output_dir / "03_camera_cone.ply"), cone,
+                    np.full((len(cone),3), [100,180,255], np.uint8))
+    print("  03_camera_cone.ply — blue camera FOV cone")
+
+    write_ply_ascii(str(output_dir / "04_pre_grasp.ply"),
+                    np.array([pre_grasp]),
+                    np.full((1,3), [0,255,80], np.uint8))
+    print("  04_pre_grasp.ply — green pre-grasp point (8cm above)")
+
+    write_ply_ascii(str(output_dir / "05_approach_arrow.ply"), approach_line,
+                    np.full((100,3), [255,200,50], np.uint8))
+    print("  05_approach_arrow.ply — yellow approach vector")
+
+    write_ply_ascii(str(output_dir / "06_grasp_point.ply"),
+                    np.array([grasp_pos]),
+                    np.full((1,3), [255,40,40], np.uint8))
+    print("  06_grasp_point.ply — red grasp contact point")
+
+    (output_dir / "README.txt").write_text("""ROBOT SIMULATION SCENE
+
+Blender: File → Import → Stanford PLY → import all 7 files
+Press Numpad 7 for TOP-DOWN view (camera looking down at table)
+Press Numpad 1 for FRONT view
+Press Numpad 3 for SIDE view
+
+Scene layout (top-down):
+  ┌─────────────────────────┐
+  │     grey table          │
+  │   ┌───────────┐         │
+  │   │  beige    │         │  ← fragment on table
+  │   │ fragment  │         │
+  │   │   ● red   │         │  ← grasp point
+  │   │   │ green │         │  ← pre-grasp (above)
+  │   └───────────┘         │
+  │          ┌ cyan         │  ← camera (30cm up)
+  └─────────────────────────┘
+
+The yellow arrow shows the robot approach direction (top-down).
+The blue cone shows the camera field of view.
+""")
 
     print(f"\n{'='*60}")
-    print(f"  Done → {glb_path}")
-    print(f"  Blender: File → Import → glTF 2.0 → robot_simulation.glb")
-    print(f"\n  Scene shows:")
-    print(f"    Table (grey), Fragment (beige) sitting on top")
-    print(f"    Pre-grasp point (green, 8cm above)")
-    print(f"    Grasp point (red, just above fragment)")
-    print(f"    Approach arrow (yellow, from pre-grasp down to grasp)")
-    print(f"    Camera position (cyan, above and in front)")
-    print(f"    Camera FOV line (light blue, camera→fragment)")
+    print(f"  Done — 7 PLY files in {output_dir}/")
+    print(f"  Blender → Import → Stanford PLY → select all files")
+    print(f"  Press Numpad 7 for TOP-DOWN view")
     print(f"{'='*60}")
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="RePAIR robot simulation scene for Blender")
+    p = argparse.ArgumentParser(description="RePAIR robot simulation scene (ASCII PLY)")
     p.add_argument("fragment", help="OBJ or PLY file")
     p.add_argument("--output", default="results/simulation", help="Output directory")
     return p.parse_args()

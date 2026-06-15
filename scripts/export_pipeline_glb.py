@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """
-RePAIR full pipeline → single GLB for Blender.  Every stage visible.
+RePAIR full pipeline → coloured PLY files for Blender.
 
-Exports all pipeline stages as named, distinctly-coloured point clouds
-and meshes in one glTF 2.0 binary file.  No Blender scripting —
-File → Import → glTF 2.0 → one click.
+Exports every pipeline stage as an individual ASCII PLY file with
+per-vertex colours and baked-in spatial offsets so all 9 stages
+are visible side-by-side.  No GLB, no Blender scripting —
+File → Import → Stanford PLY for each file.
 
-Stages exported (9 meshes)
----------------------------
-  01_OriginalMesh     Beige/tan  — raw OBJ fragment surface
-  02_VoxelDownsampled Grey       — 5 mm voxel-grid centroids
-  03_PCANormals       RGB        — normal direction encoded as colour
-  04_SceneNoisy       Blue       — random SE(3) perturbation
-  05_TEASERAligned    Green      — registration result
-  06_GeoMean          Cyan       — MC Dropout predictive mean
-  07_GeoVariance      Heatmap    — epistemic uncertainty (blue→red)
-  08_GraspsPassed     Green glow — CVaR-accepted, large spheres
-  09_GraspsFailed     Red glow   — CVaR-rejected, large spheres
+Stages (9 files in output directory)
+-------------------------------------
+  01_original.ply         Beige  — raw OBJ surface
+  02_voxel_5mm.ply        Grey   — 5 mm voxel centroids
+  03_pca_normals.ply      RGB    — normal direction as colour
+  04_scene_noisy.ply      Blue   — random SE(3) perturbation
+  05_teaser_aligned.ply   Green  — registration result
+  06_geotransformer.ply   Cyan   — MC Dropout predicted surface
+  07_variance.ply         Heat   — epistemic uncertainty (blue→red)
+  08_grasps_pass.ply      GrnGlo — CVaR accepted, large spheres
+  09_grasps_fail.ply      RedGlo — CVaR rejected, large spheres
 
 Usage
 -----
@@ -24,14 +25,12 @@ Usage
         --model checkpoints_146/geotransformer_best.pt \\
         --output results/blender_pipeline/
 
-    Then: Blender → File → Import → glTF 2.0 → repair_pipeline.glb
+    Then: Blender → File → Import → Stanford PLY (for each file)
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-import struct
 import sys
 import time
 from pathlib import Path
@@ -60,7 +59,7 @@ def _transform(T, pts):
     return pts @ T[:3,:3].T + T[:3,3]
 
 
-# ── Voxel downsample ────────────────────────────────────────────────
+# ── Voxel / PCA ─────────────────────────────────────────────────────
 
 
 def voxel_downsample(points: np.ndarray, voxel_size: float) -> np.ndarray:
@@ -94,163 +93,41 @@ def pca_normals(points: np.ndarray, k=30) -> np.ndarray:
     return normals/ns
 
 
-# ── Sphere mesh generator (for grasp contacts) ────────────────────────
+# ── ASCII PLY writer — guaranteed to work in any Blender version ────
 
 
-def sphere_vertices(center, radius=0.005, subdivisions=2):
-    """Generate icosahedron-sphere vertices around a centre point."""
-    # Use a subdivided icosahedron for smooth spheres
-    t = (1.0 + np.sqrt(5.0)) / 2.0
-    verts = np.array([
-        [-1, t, 0], [1, t, 0], [-1,-t, 0], [1,-t, 0],
-        [0,-1, t], [0, 1, t], [0,-1,-t], [0, 1,-t],
-        [t, 0,-1], [t, 0, 1], [-t, 0,-1], [-t, 0, 1],
-    ], dtype=np.float64)
-    verts /= np.linalg.norm(verts[0])
-    faces = np.array([
-        [0,11,5],[0,5,1],[0,1,7],[0,7,10],[0,10,11],
-        [1,5,9],[5,11,4],[11,10,2],[10,7,6],[7,1,8],
-        [3,9,4],[3,4,2],[3,2,6],[3,6,8],[3,8,9],
-        [4,9,5],[2,4,11],[6,2,10],[8,6,7],[9,8,1],
-    ], dtype=np.int32)
-    # subdivide
-    for _ in range(subdivisions):
-        new_faces = []
-        edge_mid = {}
-        def _mid(a,b):
-            k = (min(a,b), max(a,b))
-            if k not in edge_mid:
-                edge_mid[k] = verts[a] + verts[b]
-                edge_mid[k] /= np.linalg.norm(edge_mid[k])
-            return edge_mid[k]
-        for f in faces:
-            va, vb, vc = int(f[0]), int(f[1]), int(f[2])
-            # Add midpoints if needed
-            m_ab = _mid(va, vb) if (va,vb) not in edge_mid else None
-            # Actually just do naive: create 4 faces per original face
-            # Mid indices will be stored
-            pass
-        # Simple approach: just use many points approximating a sphere surface
-        break  # skip subdivision for now, use dense random sampling instead
-
-    # Random sampling on sphere surface approximates it well for small radius
-    n = 500
-    rng_n = np.random.default_rng(hash(str(center)) % 2**32)
-    theta = np.arccos(1 - 2*rng_n.random(n))
-    phi = 2*np.pi*rng_n.random(n)
-    sx = radius*np.sin(theta)*np.cos(phi) + center[0]
-    sy = radius*np.sin(theta)*np.sin(phi) + center[1]
-    sz = radius*np.cos(theta) + center[2]
-    return np.column_stack([sx, sy, sz])
+def write_ply_ascii(path: str, points: np.ndarray, colours_uint8: np.ndarray) -> None:
+    """Write ASCII PLY with float x,y,z and uchar r,g,b per vertex."""
+    n = len(points)
+    pts = points.astype(np.float64)
+    cls = colours_uint8.astype(np.uint8)
+    with open(path, "w") as f:
+        f.write("ply\n")
+        f.write("format ascii 1.0\n")
+        f.write(f"element vertex {n}\n")
+        f.write("property float x\nproperty float y\nproperty float z\n")
+        f.write("property uchar red\nproperty uchar green\nproperty uchar blue\n")
+        f.write("end_header\n")
+        for i in range(n):
+            f.write(f"{pts[i,0]:.6f} {pts[i,1]:.6f} {pts[i,2]:.6f} "
+                    f"{cls[i,0]} {cls[i,1]} {cls[i,2]}\n")
 
 
-def grasp_line_points(c1, c2, n_pts=50):
-    """Generate points along a line between two contact points."""
-    t = np.linspace(0, 1, n_pts)
+def sphere_cloud(center, radius=0.005, n=500):
+    """Random points on a sphere surface."""
+    rng = np.random.default_rng(hash(str(center)) % 2**32)
+    theta = np.arccos(1 - 2*rng.random(n))
+    phi = 2*np.pi*rng.random(n)
+    return np.column_stack([
+        radius*np.sin(theta)*np.cos(phi)+center[0],
+        radius*np.sin(theta)*np.sin(phi)+center[1],
+        radius*np.cos(theta)+center[2]])
+
+
+def line_points(c1, c2, n=80):
+    """Points along a line segment."""
+    t = np.linspace(0, 1, n)
     return c1 + t[:, None] * (c2 - c1)
-
-
-# ── GLB writer ───────────────────────────────────────────────────────
-
-
-def write_glb(output_path: str, meshes: list[dict]) -> None:
-    """
-    Write glTF 2.0 binary (.glb) with interleaved position + color.
-
-    Each mesh dict: {'name':str, 'points':(N,3) float, 'colors':(N,3) uint8}
-    """
-    buffer_views = []
-    accessors = []
-    meshes_gltf = []
-    nodes = []
-    materials = []
-    bin_data = bytearray()
-    byte_offset = 0
-    material_cache = {}
-    material_indices = {}
-
-    for m_idx, m in enumerate(meshes):
-        pts = m['points'].astype(np.float32)
-        cols = m['colors']
-        if np.issubdtype(cols.dtype, np.floating):
-            cols = np.clip(cols*255, 0, 255).astype(np.uint8)
-        cols = cols.astype(np.uint8)
-        n = len(pts)
-        if n == 0:
-            continue
-
-        # Apply side-by-side spatial offset so stages don't overlap
-        offset_x = m.get('offset_x', 0.0)
-        pts = pts.copy()
-        pts[:, 0] += offset_x
-
-        # Interleaved row: 12 bytes position + 3 bytes color + 1 pad = 16 bytes
-        row = np.zeros(n, dtype=[('x','f4'),('y','f4'),('z','f4'),
-                                  ('r','u1'),('g','u1'),('b','u1'),('pad','u1')])
-        row['x']=pts[:,0]; row['y']=pts[:,1]; row['z']=pts[:,2]
-        row['r']=cols[:,0]; row['g']=cols[:,1]; row['b']=cols[:,2]
-        row_bytes = row.tobytes()
-
-        acc_pos = len(accessors)
-        accessors.append({"bufferView":len(buffer_views),"componentType":5126,
-                          "count":n,"type":"VEC3",
-                          "max":[float(pts[:,0].max()),float(pts[:,1].max()),float(pts[:,2].max())],
-                          "min":[float(pts[:,0].min()),float(pts[:,1].min()),float(pts[:,2].min())]})
-        buffer_views.append({"buffer":0,"byteOffset":byte_offset,"byteLength":len(row_bytes),
-                             "byteStride":16,"target":34962})
-
-        acc_col = len(accessors)
-        accessors.append({"bufferView":len(buffer_views),"componentType":5121,
-                          "count":n,"type":"VEC3","normalized":True})
-        buffer_views.append({"buffer":0,"byteOffset":byte_offset+12,"byteLength":len(row_bytes),
-                             "byteStride":16,"target":34962})
-
-        bin_data.extend(row_bytes)
-        byte_offset += len(row_bytes)
-
-        # Material with KHR_materials_unlit — bright flat colours, no lighting
-        mat_key = m.get('emat','')
-        if mat_key not in material_cache:
-            r,g,b = m.get('material_color',[0.5,0.5,0.5])
-            mat = {
-                "pbrMetallicRoughness": {"baseColorFactor":[r,g,b,1.0],
-                    "roughnessFactor":0.4,"metallicFactor":0.0},
-                "extensions": {"KHR_materials_unlit": {}},
-            }
-            if m.get('emissive', None):
-                mat["emissiveFactor"] = m['emissive']
-                del mat["extensions"]  # emissive materials need lighting
-            material_cache[mat_key] = len(materials)
-            materials.append(mat)
-
-        mesh_idx = len(meshes_gltf)
-        meshes_gltf.append({"primitives":[{"attributes":{"POSITION":acc_pos,"COLOR_0":acc_col},
-                            "mode":0,"material":material_cache[mat_key]}]})
-        nodes.append({"mesh":mesh_idx,"name":m['name']})
-
-    gltf = {
-        "asset":{"version":"2.0","generator":"RePAIR pipeline"},
-        "scene":0,"scenes":[{"nodes":list(range(len(nodes)))}],
-        "nodes":nodes,"meshes":meshes_gltf,
-        "accessors":accessors,"bufferViews":buffer_views,
-        "buffers":[{"byteLength":len(bin_data)}],
-        "materials":materials,
-        "extensionsUsed":["KHR_materials_unlit"],
-        "extensionsRequired":["KHR_materials_unlit"],
-    }
-    js = json.dumps(gltf, separators=(',',':'))
-    while len(js)%4 != 0: js += ' '
-    jb = js.encode('utf-8')
-
-    total = 12 + 8 + len(jb) + 8 + len(bin_data)
-    hdr = struct.pack('<III', 0x46546C67, 2, total)
-    jch = struct.pack('<II', len(jb), 0x4E4F534A) + jb
-    bch = struct.pack('<II', len(bin_data), 0x004E4942) + bin_data
-
-    with open(output_path, 'wb') as f:
-        f.write(hdr); f.write(jch); f.write(bch)
-    size_mb = total/(1024*1024)
-    print(f"  GLB: {output_path} ({size_mb:.1f} MB, {len(nodes)} meshes)")
 
 
 # ── Main ─────────────────────────────────────────────────────────────
@@ -266,12 +143,13 @@ def main() -> None:
 
     # ── 1. Load original OBJ ──
     print("=== 1. Loading original OBJ ===")
-    if Path(args.fragment).suffix.lower() == ".obj":
+    ext = Path(args.fragment).suffix.lower()
+    if ext == ".obj":
         verts = []
-        with open(args.fragment, encoding="utf-8",errors="ignore") as f:
+        with open(args.fragment, encoding="utf-8", errors="ignore") as f:
             for line in f:
                 if line.startswith("v "):
-                    p = line.split(); verts.append([float(p[1]),float(p[2]),float(p[3])])
+                    p = line.split(); verts.append([float(p[1]), float(p[2]), float(p[3])])
         raw_pts = np.array(verts, dtype=np.float64)
     else:
         pcd = o3d.io.read_point_cloud(args.fragment)
@@ -287,11 +165,8 @@ def main() -> None:
 
     # ── 3. PCA normals ──
     print("\n=== 3. PCA normal estimation (k=30) ===")
-    normals = pca_normals(ds_pts)
-    # Encode normals as RGB: R = |nx| in x, G = |ny| in y, B = |nz| in z
-    # This makes sphere-like geometry show rainbow colours by normal direction
-    normal_rgb = ((normals + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
-    print(f"  Normals encoded as RGB colours")
+    norms = pca_normals(ds_pts)
+    normal_rgb = ((norms + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
 
     # ── 4. Scene cloud ──
     print("\n=== 4. Scene cloud (random SE(3) perturbation) ===")
@@ -299,7 +174,7 @@ def main() -> None:
     print(f"  {rot_deg:.1f}° rotation, {t_norm:.4f}m translation")
     scene_pts = _transform(T_gt, ds_pts)
 
-    # ── 5. TEASER++ registration ──
+    # ── 5. TEASER++ ──
     print("\n=== 5. TEASER++ registration ===")
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from registration.teaser_registration import register_teaser, TeaserParams
@@ -307,7 +182,7 @@ def main() -> None:
     model_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(ds_pts))
     t0 = time.perf_counter()
     r = register_teaser(scene_pcd, model_pcd,
-        TeaserParams(c_threshold=0.005,noise_bound=0.001,fpfh_radius=0.035,ratio_threshold=0.9))
+        TeaserParams(c_threshold=0.005, noise_bound=0.001, fpfh_radius=0.035, ratio_threshold=0.9))
     elapsed = time.perf_counter()-t0
     T_est = np.asarray(r.T, dtype=np.float64)
     aligned_pts = _transform(T_est, scene_pts)
@@ -316,27 +191,27 @@ def main() -> None:
     # ── 6. MC Dropout ──
     print("\n=== 6. GeoTransformer MC Dropout ===")
     geo_mean = ds_pts.copy()
-    geo_var_colors = np.full((len(ds_pts),3), [128,128,128], dtype=np.uint8)
+    var_colors = np.full((len(ds_pts),3), [128,128,128], dtype=np.uint8)
     if args.model and Path(args.model).exists():
         from uncertainty.geotransformer import GeoTransformer
         from uncertainty.mc_inference import run_mc_passes
         from uncertainty.pose_covariance import variance_to_rgb
         import torch
         ckpt = torch.load(args.model, map_location="cpu", weights_only=True)
-        model = GeoTransformer(in_channels=6,embed_dim=128,num_heads=4,
-                               num_layers=4,bottleneck_dropout=args.dropout_rate)
+        model = GeoTransformer(in_channels=6, embed_dim=128, num_heads=4,
+                               num_layers=4, bottleneck_dropout=args.dropout_rate)
         model.load_state_dict(ckpt["model_state_dict"]); model.set_mc_mode(True); model.eval()
-        cent = np.array(ckpt.get("centroids",[[0,0,0]])[0])
-        scl = float(ckpt.get("scales",[1.0])[0])
-        nrm = np.zeros_like(ds_pts)
-        data = np.column_stack([(ds_pts-cent)/scl, nrm])
+        cent = np.array(ckpt.get("centroids", [[0,0,0]])[0])
+        scl = float(ckpt.get("scales", [1.0])[0])
+        nrm_data = np.zeros_like(ds_pts)
+        data = np.column_stack([(ds_pts-cent)/scl, nrm_data])
         data_t = torch.from_numpy(data.astype(np.float32))
         mean_t, var_t = run_mc_passes(model, data_t, T=args.mc_passes,
                                        batch_size=4096, device="cpu", verbose=True)
         geo_mean = mean_t.numpy()*scl + cent
         var_np = var_t.numpy()*(scl**2)
-        geo_var_colors = (variance_to_rgb(var_np)*255).astype(np.uint8)
-        print(f"  Epistemic σ²: mean={var_np.mean():.1f}, range=[{var_np.min():.1f}, {var_np.max():.1f}]")
+        var_colors = (variance_to_rgb(var_np)*255).astype(np.uint8)
+        print(f"  σ² mean={var_np.mean():.1f}, range=[{var_np.min():.1f},{var_np.max():.1f}]")
     else:
         print("  Model not found — grey placeholder")
 
@@ -344,13 +219,12 @@ def main() -> None:
     print("\n=== 7. CVaR grasp generation ===")
     from scipy.spatial import cKDTree
     k = min(30, len(ds_pts)); tree = cKDTree(ds_pts); _, idx = tree.query(ds_pts, k=k)
-    nbrs = ds_pts[idx]; mu_n = nbrs.mean(axis=1,keepdims=True)
+    nbrs = ds_pts[idx]; mu_n = nbrs.mean(axis=1, keepdims=True)
     cov_n = np.einsum("nki,nkj->nij", nbrs-mu_n, nbrs-mu_n)/(k-1)
-    _, eigvecs = np.linalg.eigh(cov_n)
-    mesh_n = eigvecs[:,:,0].copy()
+    _, eigv = np.linalg.eigh(cov_n)
+    mesh_n = eigv[:,:,0].copy()
     d_in = np.sum(mesh_n*(-ds_pts), axis=1); mesh_n[d_in<0]*=-1.0
     ns = np.linalg.norm(mesh_n, axis=1, keepdims=True); ns[ns<1e-12]=1.0; mesh_n/=ns
-
     rng = np.random.default_rng(seed)
     cos_a = np.cos(np.arctan(args.mu)); cos_min = cos_a*0.5
     accepted, rejected = [], []
@@ -365,58 +239,89 @@ def main() -> None:
             (accepted if s1>=cos_a-1e-9 and s2>=cos_a-1e-9 else rejected).append((ds_pts[i],ds_pts[j]))
     print(f"  {len(accepted)} accepted, {len(rejected)} rejected")
 
-    # Large visible grasp spheres + axis lines
-    grasp_ok_pts, grasp_ok_cols = [], []
-    grasp_fail_pts, grasp_fail_cols = [], []
+    # ── Build large visible grasp meshes ──
+    grasp_ok_pts, grasp_ok_col = [], []
     for (c1,c2) in accepted:
-        # Big sphere at each contact
-        grasp_ok_pts.append(sphere_vertices(c1, radius=0.004))
-        grasp_ok_cols.append(np.full((500,3),[0,255,50],dtype=np.uint8))
-        grasp_ok_pts.append(sphere_vertices(c2, radius=0.004))
-        grasp_ok_cols.append(np.full((500,3),[0,255,50],dtype=np.uint8))
-        # Line connecting them
-        grasp_ok_pts.append(grasp_line_points(c1,c2,80))
-        grasp_ok_cols.append(np.full((80,3),[0,200,50],dtype=np.uint8))
+        for c in [c1,c2]:
+            grasp_ok_pts.append(sphere_cloud(c, 0.005))
+            grasp_ok_col.append(np.full((500,3),[0,255,50],np.uint8))
+        grasp_ok_pts.append(line_points(c1,c2,80))
+        grasp_ok_col.append(np.full((80,3),[0,200,50],np.uint8))
+
+    grasp_fail_pts, grasp_fail_col = [], []
     for (c1,c2) in rejected[:8]:
-        grasp_fail_pts.append(sphere_vertices(c1, radius=0.003))
-        grasp_fail_cols.append(np.full((500,3),[255,30,30],dtype=np.uint8))
-        grasp_fail_pts.append(sphere_vertices(c2, radius=0.003))
-        grasp_fail_cols.append(np.full((500,3),[255,30,30],dtype=np.uint8))
-        grasp_fail_pts.append(grasp_line_points(c1,c2,50))
-        grasp_fail_cols.append(np.full((50,3),[200,30,30],dtype=np.uint8))
+        for c in [c1,c2]:
+            grasp_fail_pts.append(sphere_cloud(c, 0.004))
+            grasp_fail_col.append(np.full((500,3),[255,30,30],np.uint8))
+        grasp_fail_pts.append(line_points(c1,c2,60))
+        grasp_fail_col.append(np.full((60,3),[200,30,30],np.uint8))
 
-    # ── 8. Write GLB ──
-    print("\n=== 8. Writing GLB ===")
-    meshes = [
-        {'name':'01_ORIGINAL_MESH',      'points':raw_pts,     'colors':np.full((len(raw_pts),3),[210,180,140],dtype=np.uint8), 'material_color':[0.82,0.70,0.55], 'emat':'beige',  'offset_x':-0.24},
-        {'name':'02_VOXEL_5mm',          'points':ds_pts,      'colors':np.full((len(ds_pts),3),[150,150,150],dtype=np.uint8),  'material_color':[0.60,0.60,0.60], 'emat':'grey',   'offset_x':-0.18},
-        {'name':'03_PCA_NORMALS',        'points':ds_pts,      'colors':normal_rgb,                                                'material_color':[0.70,0.70,0.70], 'emat':'rgb',    'offset_x':-0.12},
-        {'name':'04_SCENE_NOISY',        'points':scene_pts,   'colors':np.full((len(scene_pts),3),[50,100,255],dtype=np.uint8),  'material_color':[0.20,0.40,1.00], 'emat':'blue',   'offset_x':-0.06},
-        {'name':'05_TEASER_ALIGNED',     'points':aligned_pts, 'colors':np.full((len(aligned_pts),3),[0,230,60],dtype=np.uint8),  'material_color':[0.00,0.90,0.24], 'emat':'green',  'offset_x':0.00},
-        {'name':'06_GEOTRANSFORMER_MEAN','points':geo_mean,    'colors':np.full((len(geo_mean),3),[0,200,220],dtype=np.uint8),    'material_color':[0.00,0.78,0.86], 'emat':'cyan',   'offset_x':0.06},
-        {'name':'07_VARIANCE_HEATMAP',   'points':ds_pts,      'colors':geo_var_colors,                                            'material_color':[0.50,0.50,0.50], 'emat':'heat',   'offset_x':0.12},
+    # ── Side-by-side offsets ──
+    # Each stage shifted 0.07m in X so they don't overlap.
+    SPACING = 0.07
+
+    # ── 8. Write PLY files ──
+    print("\n=== 8. Writing coloured PLY files ===")
+    stages = [
+        ("01_original.ply",           raw_pts,     np.full((len(raw_pts),3),[210,180,140],np.uint8)),
+        ("02_voxel_5mm.ply",          ds_pts,      np.full((len(ds_pts),3),[150,150,150],np.uint8)),
+        ("03_pca_normals.ply",        ds_pts,      normal_rgb),
+        ("04_scene_noisy.ply",        scene_pts,   np.full((len(scene_pts),3),[50,100,255],np.uint8)),
+        ("05_teaser_aligned.ply",     aligned_pts, np.full((len(aligned_pts),3),[0,230,60],np.uint8)),
+        ("06_geotransformer.ply",     geo_mean,    np.full((len(geo_mean),3),[0,200,220],np.uint8)),
+        ("07_variance.ply",           ds_pts,      var_colors),
     ]
+
+    for idx, (name, pts, cols) in enumerate(stages):
+        pts_offset = pts.copy()
+        pts_offset[:, 0] += idx * SPACING
+        write_ply_ascii(str(output_dir / name), pts_offset, cols)
+        print(f"  {name}")
+
     if grasp_ok_pts:
-        meshes.append({'name':'08_GRASPS_PASSED', 'points':np.vstack(grasp_ok_pts), 'colors':np.vstack(grasp_ok_cols),
-                       'material_color':[0.0,1.0,0.2], 'emissive':[0.0,0.5,0.1], 'emat':'ok', 'offset_x':0.18})
+        go = np.vstack(grasp_ok_pts); go[:,0] += 7*SPACING
+        write_ply_ascii(str(output_dir / "08_grasps_pass.ply"), go, np.vstack(grasp_ok_col))
+        print(f"  08_grasps_pass.ply")
     if grasp_fail_pts:
-        meshes.append({'name':'09_GRASPS_FAILED', 'points':np.vstack(grasp_fail_pts), 'colors':np.vstack(grasp_fail_cols),
-                       'material_color':[1.0,0.0,0.0], 'emissive':[0.5,0.0,0.0], 'emat':'fail', 'offset_x':0.24})
+        gf = np.vstack(grasp_fail_pts); gf[:,0] += 8*SPACING
+        write_ply_ascii(str(output_dir / "09_grasps_fail.ply"), gf, np.vstack(grasp_fail_col))
+        print(f"  09_grasps_fail.ply")
 
-    glb_path = output_dir / "repair_pipeline.glb"
-    write_glb(str(glb_path), meshes)
+    # ── README ──
+    readme = f"""REPAIR PIPELINE VISUALISATION — 9 stage files
 
-    print(f"\n{'='*65}")
-    print(f"  Done → {glb_path}")
-    print(f"  Blender: File → Import → glTF 2.0 → repair_pipeline.glb")
-    print(f"  All 9 pipeline stages visible with distinct colours.")
-    print(f"  Grasp spheres are large 4mm-radius balls at contact points.")
-    print(f"  Grasp axis lines connect each contact pair.")
-    print(f"{'='*65}")
+Blender instructions:
+  1. File → Import → Stanford PLY (.ply)
+  2. Import each file listed below
+  3. Press Numpad 7 for TOP-DOWN view
+  4. Press Numpad 1 for FRONT view  
+  5. Press Numpad 3 for SIDE view
+  6. Outliner (top-right panel) shows all 9 objects by name
+  7. Click the eye icon to toggle visibility per object
+
+Files and colours:
+  01_original.ply          BEIGE   — raw OBJ mesh ({len(raw_pts):,} verts)
+  02_voxel_5mm.ply         GREY    — 5mm voxel grid ({len(ds_pts):,} pts)
+  03_pca_normals.ply       RAINBOW — PCA normals as RGB ({len(ds_pts):,} pts)
+  04_scene_noisy.ply       BLUE    — random SE(3) perturbation
+  05_teaser_aligned.ply    GREEN   — TEASER++ registration result
+  06_geotransformer.ply    CYAN    — GeoTransformer predicted surface
+  07_variance.ply          HEATMAP — epistemic uncertainty (blue=low, red=high)
+  08_grasps_pass.ply       GREEN   — CVaR accepted grasp spheres + axis
+  09_grasps_fail.ply       RED     — CVaR rejected grasp spheres + axis
+
+Each file is offset along X by 0.07m so stages don't overlap.
+"""
+    (output_dir / "README.txt").write_text(readme)
+
+    print(f"\n{'='*60}")
+    print(f"  Done — {len(stages)+2} PLY files in {output_dir}/")
+    print(f"  Blender: File → Import → Stanford PLY → select each .ply")
+    print(f"{'='*60}")
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="RePAIR full pipeline → GLB for Blender")
+    p = argparse.ArgumentParser(description="RePAIR full pipeline → coloured PLY for Blender")
     p.add_argument("fragment", help="OBJ or PLY file")
     p.add_argument("--output", default="results/blender_pipeline", help="Output directory")
     p.add_argument("--model", default="checkpoints_146/geotransformer_best.pt")

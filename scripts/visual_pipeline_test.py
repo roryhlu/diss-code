@@ -115,30 +115,51 @@ BASE = r"{output_dir.resolve()}"
 bpy.ops.object.select_all(action='SELECT')
 bpy.ops.object.delete()
 
-# ── Import an ASCII PLY file (Blender 3.x to 4.x compatible) ──
+# ── Import an ASCII PLY file (any Blender version) ──
 def import_ply(filename, obj_name):
     path = os.path.join(BASE, filename)
     if not os.path.exists(path):
         print(f"  MISSING: {{filename}}")
         return None
     print(f"  Loading: {{filename}} ...")
-    # Try Blender 4.0+ import_mesh.ply first, then 3.x wm.ply_import
+
+    # Try Blender's native PLY import operators
     for op in [bpy.ops.import_mesh.ply, bpy.ops.wm.ply_import]:
         try:
             op(filepath=path)
-            break
+            obj = bpy.context.active_object
+            if obj and getattr(obj.data, 'vertices', None) and len(obj.data.vertices) > 0:
+                obj.name = obj_name
+                print(f"    -> {{len(obj.data.vertices)}} vertices (native)")
+                return obj
         except (AttributeError, RuntimeError):
             continue
-    else:
-        print(f"  FAILED: no PLY importer available. Check Blender version.")
+
+    # Raw Python fallback — parse ASCII PLY, create mesh manually.
+    # Works on any Blender version, no addon or operator needed.
+    print(f"    Native import failed — parsing raw ASCII ...")
+    try:
+        with open(path) as fh:
+            n = 0
+            for line in fh:
+                if 'element vertex' in line:
+                    n = int(line.split()[-1]); break
+            while fh.readline().strip() != 'end_header':
+                pass
+            verts = []
+            for i, line in enumerate(fh):
+                if i >= n: break
+                x, y, z = line.split()[:3]
+                verts.append((float(x), float(y), float(z)))
+        mesh = bpy.data.meshes.new(name=obj_name)
+        mesh.from_pydata(verts, [], [])
+        obj = bpy.data.objects.new(obj_name, mesh)
+        bpy.context.collection.objects.link(obj)
+        print(f"    -> {{len(verts)}} vertices (raw parse)")
+        return obj
+    except Exception as e:
+        print(f"  FAILED: {{e}}")
         return None
-    obj = bpy.context.active_object
-    if obj is None:
-        print(f"  FAILED: {{filename}} — no object created")
-        return None
-    obj.name = obj_name
-    print(f"    -> {{len(obj.data.vertices)}} vertices")
-    return obj
 
 # ── Camera (for ~0.05m fragment at origin) ──
 bpy.ops.object.camera_add(location=(0.08, -0.10, 0.06))

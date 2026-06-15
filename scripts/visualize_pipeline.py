@@ -116,32 +116,26 @@ def line_pts(c1, c2, n=60):
 # ── Plotly helpers ──────────────────────────────────────────────────
 
 
-def _scatter3d(pts, color_rgba_str, name, size=2):
+def _scatter3d(pts, color_rgba_str, size=2):
     """Single 3D scatter trace."""
     return go.Scatter3d(
         x=pts[:,0], y=pts[:,1], z=pts[:,2],
         mode='markers', marker=dict(size=size, color=color_rgba_str),
-        name=name, showlegend=False,
+        showlegend=False,
     )
 
 
-def _subplot_scene(fig, row, col, pts, color, title, size=2):
+def _subplot_scene(fig, row, col, pts, color, size=2):
     """Add a 3D scatter subplot to the figure."""
     if len(pts) > 30000:
         idx = np.random.default_rng(0).choice(len(pts), 30000, replace=False)
         pts = pts[idx]
-    fig.add_trace(_scatter3d(pts, color, title, size), row=row, col=col)
+    fig.add_trace(_scatter3d(pts, color, size), row=row, col=col)
     fig.update_scenes(
         dict(
             xaxis_title='X', yaxis_title='Y', zaxis_title='Z',
             camera=dict(eye=dict(x=0, y=0, z=2)),
         ),
-        row=row, col=col,
-    )
-    # Set title via annotation
-    fig.add_annotation(
-        text=f"<b>{title}</b>", xref=f"x domain", yref=f"y domain",
-        x=0.5, y=1.05, showarrow=False, font=dict(size=13),
         row=row, col=col,
     )
 
@@ -263,16 +257,20 @@ def run_pipeline(args):
     # ── Build Plotly 3x3 grid ──
     print("\n=== 8. Building interactive HTML ===")
     fig = make_subplots(rows=3, cols=3,
-        subplot_titles=[],  # we add our own annotations
+        subplot_titles=[
+            '01 Original',     '02 Voxel 5mm',    '03 PCA Normals',
+            '04 Scene Noisy',  '05 TEASER++',     '06 GeoTransformer',
+            '07 Variance',     '08 Grasps Pass',   '09 Grasps Fail',
+        ],
         specs=[[{'type':'scatter3d'}]*3]*3,
         horizontal_spacing=0.01, vertical_spacing=0.02,
     )
 
     # Row 1
-    _subplot_scene(fig,1,1, raw, 'rgb(210,180,140)', '01 Original', size=1)
-    _subplot_scene(fig,1,2, ds,  'rgb(150,150,150)', '02 Voxel 5mm', size=2)
-    _subplot_scene(fig,1,3, ds,  None,                '03 PCA Normals', size=2)
-    # Manually set PCA normal colors (need a trace per channel or use plotly colors)
+    _subplot_scene(fig,1,1, raw, 'rgb(210,180,140)', size=1)
+    # Row 1 col 2
+    _subplot_scene(fig,1,2, ds,  'rgb(150,150,150)', size=2)
+    # Row 1 col 3 — PCA normals (per-vertex colors)
     if len(ds) > 10000:
         si = np.random.default_rng(0).choice(len(ds), 10000, replace=False)
     else:
@@ -281,14 +279,16 @@ def run_pipeline(args):
         mode='markers', marker=dict(size=2,
             color=[f'rgb({normal_rgb[i,0]},{normal_rgb[i,1]},{normal_rgb[i,2]})' for i in si]),
         showlegend=False), row=1, col=3)
+    fig.update_scenes(dict(xaxis_title='X',yaxis_title='Y',zaxis_title='Z',
+        camera=dict(eye=dict(x=0,y=0,z=2))), row=1, col=3)
 
     # Row 2
-    _subplot_scene(fig,2,1, scene,   'rgb(50,100,255)', '04 Scene Noisy', size=2)
-    _subplot_scene(fig,2,2, aligned, 'rgb(0,230,60)',   '05 TEASER++', size=2)
-    _subplot_scene(fig,2,3, geo_mean,'rgb(0,200,220)',  '06 GeoTransformer', size=2)
+    _subplot_scene(fig,2,1, scene,   'rgb(50,100,255)', size=2)
+    _subplot_scene(fig,2,2, aligned, 'rgb(0,230,60)',   size=2)
+    _subplot_scene(fig,2,3, geo_mean,'rgb(0,200,220)',  size=2)
 
     # Row 3
-    _subplot_scene(fig,3,1, ds, None, '07 Variance', size=2)
+    # Row 3 col 1 — Variance heatmap (per-vertex colors)
     if len(ds) > 10000:
         si = np.random.default_rng(0).choice(len(ds), 10000, replace=False)
     else:
@@ -297,15 +297,17 @@ def run_pipeline(args):
         mode='markers', marker=dict(size=2,
             color=[f'rgb({var_colors_u8[i,0]},{var_colors_u8[i,1]},{var_colors_u8[i,2]})' for i in si]),
         showlegend=False), row=3, col=1)
+    fig.update_scenes(dict(xaxis_title='X',yaxis_title='Y',zaxis_title='Z',
+        camera=dict(eye=dict(x=0,y=0,z=2))), row=3, col=1)
 
     if ok_pts:
-        _subplot_scene(fig,3,2, np.vstack(ok_pts), 'rgb(0,255,50)', '08 Grasps Pass', size=3)
+        _subplot_scene(fig,3,2, np.vstack(ok_pts), 'rgb(0,255,50)', size=3)
     else:
-        _subplot_scene(fig,3,2, np.array([[0,0,0]]), 'rgb(0,0,0)', '08 Grasps Pass (none)', size=1)
+        _subplot_scene(fig,3,2, np.array([[0,0,0]]), 'rgb(0,0,0)', size=1)
     if fail_pts:
-        _subplot_scene(fig,3,3, np.vstack(fail_pts), 'rgb(255,30,30)', '09 Grasps Fail', size=3)
+        _subplot_scene(fig,3,3, np.vstack(fail_pts), 'rgb(255,30,30)', size=3)
     else:
-        _subplot_scene(fig,3,3, np.array([[0,0,0]]), 'rgb(0,0,0)', '09 Grasps Fail (none)', size=1)
+        _subplot_scene(fig,3,3, np.array([[0,0,0]]), 'rgb(0,0,0)', size=1)
 
     # Global layout
     fig.update_layout(

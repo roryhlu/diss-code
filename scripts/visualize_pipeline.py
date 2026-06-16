@@ -195,26 +195,12 @@ const dl = new THREE.DirectionalLight(0xffffff, 4);
 dl.position.set(0.1,-0.2,0.15);
 scene.add(dl);
 
-// Axes — visible coloured point clouds (WebGL doesn't support thick lines)
-function addAxis(color, fromPt, toPt, nPts=200) {{
-    const pts = new Float32Array(nPts*3), cols = new Float32Array(nPts*3);
-    const r=color>>16&255,g=color>>8&255,b=color&255;
-    for (let i=0;i<nPts;i++) {{
-        const t=i/(nPts-1);
-        pts[i*3]=fromPt.x+(toPt.x-fromPt.x)*t;
-        pts[i*3+1]=fromPt.y+(toPt.y-fromPt.y)*t;
-        pts[i*3+2]=fromPt.z+(toPt.z-fromPt.z)*t;
-        cols[i*3]=r/255;cols[i*3+1]=g/255;cols[i*3+2]=b/255;
-    }}
-    const g=new THREE.BufferGeometry();
-    g.setAttribute('position',new THREE.BufferAttribute(pts,3));
-    g.setAttribute('color',new THREE.BufferAttribute(cols,3));
-    scene.add(new THREE.Points(g,new THREE.PointsMaterial({{size:0.006,vertexColors:true,sizeAttenuation:true}})));
-}}
-const O=new THREE.Vector3(0,0,0);
-addAxis(0xff0000, O, new THREE.Vector3(0.05,0,0));  // X red
-addAxis(0x00ff00, O, new THREE.Vector3(0,0.05,0));  // Y green
-addAxis(0x0000ff, O, new THREE.Vector3(0,0,0.05));  // Z blue
+// Axes
+const ax = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0,0,0),new THREE.Vector3(0.02,0,0),
+    new THREE.Vector3(0,0,0),new THREE.Vector3(0,0.02,0),
+    new THREE.Vector3(0,0,0),new THREE.Vector3(0,0,0.02)]);
+scene.add(new THREE.LineSegments(ax, new THREE.LineBasicMaterial({{color:0xffffff}})));
 
 // Build point clouds
 const groups = [];
@@ -406,15 +392,15 @@ def run_pipeline(args):
         {'name':'05_TEASER_Aligned','size':0.005,  'offset_x':0, **points_to_json(aligned, np.full((len(aligned),3),[0,230,60],np.uint8))},
         {'name':'06_GeoTransformer','size':0.005,  'offset_x':0, **points_to_json(geo_mean, np.full((len(geo_mean),3),[0,200,220],np.uint8))},
         {'name':'07_Variance',      'size':0.005,  'offset_x':0, **points_to_json(ds, var_colors_u8)},
-        {'name':'08_Grasps_Pass',   'size':0.060,  'offset_x':0, **sphere_json([c for (c,_) in acc]+[c for (_,c) in acc], [0,255,50], 0.100)},
-        {'name':'09_Grasps_Fail',   'size':0.055,  'offset_x':0, **sphere_json([c for (c,_) in rej[:6]]+[c for (_,c) in rej[:6]], [255,30,30], 0.090)},
+        {'name':'08_Grasps_Pass',   'size':0.040,  'offset_x':0, **sphere_json([c for (c,_) in acc]+[c for (_,c) in acc], [0,255,50], 0.030)},
+        {'name':'09_Grasps_Fail',   'size':0.035,  'offset_x':0, **sphere_json([c for (c,_) in rej[:6]]+[c for (_,c) in rej[:6]], [255,30,30], 0.025)},
     ]
     # Add grasp axis lines as extra entries with sphere data layered on same offset
     if acc:
-        pipeline_data.append({'name':'08b_Grasp_Axis_Pass','size':0.025,'offset_x':0,
+        pipeline_data.append({'name':'08b_Grasp_Axis_Pass','size':0.0008,'offset_x':0,
             **line_json(acc, [0,200,50], 40)})
     if rej:
-        pipeline_data.append({'name':'09b_Grasp_Axis_Fail','size':0.020,'offset_x':0,
+        pipeline_data.append({'name':'09b_Grasp_Axis_Fail','size':0.0006,'offset_x':0,
             **line_json(rej[:6], [200,30,30], 30)})
 
     html = build_html(pipeline_data)

@@ -363,42 +363,78 @@ def run_pipeline(args):
         var_colors_u8 = (variance_to_rgb(vn)*255).astype(np.uint8)
 
     # ── Practical top-surface grasps for Mirobot parallel gripper ──
+    # Physics-based scoring: CoM alignment + moment of inertia + surface flatness.
     # The parallel gripper approaches from above, closes in XY plane.
-    # Both contacts must be on the top surface with horizontal axis.
-    # No antipodal check needed — the gripper hardware does the gripping.
+
+    # Center of Mass (CoM) — uniform density estimate from point cloud
+    com = ds.mean(axis=0)
+
+    # Moment of Inertia tensor (3×3) — resistance to rotation around each axis
+    # Point cloud assumed uniform density, centred at CoM
+    pts_c = ds - com  # centre at CoM
+    x, y, z = pts_c[:,0], pts_c[:,1], pts_c[:,2]
+    N = len(ds)
+    Ixx = np.sum(y*y + z*z) / N
+    Iyy = np.sum(x*x + z*z) / N
+    Izz = np.sum(x*x + y*y) / N  # spinning like a coin — largest for flat fragments
+    Ixy = -np.sum(x*y) / N
+    Ixz = -np.sum(x*z) / N
+    Iyz = -np.sum(y*z) / N
+
+    print(f"  CoM: [{com[0]:.1f}, {com[1]:.1f}, {com[2]:.1f}]mm")
+    print(f"  Inertia: Ixx={Ixx:.0f} Iyy={Iyy:.0f} Izz={Izz:.0f} mm²")
 
     # Top surface: Z > 70th percentile AND normal Z > 0.3 (faces upward)
     z_cut = float(np.percentile(ds[:,2], 70))
     top_mask = (ds[:,2] >= z_cut) & (norms[:,2] > 0.3)
     top_idx = np.where(top_mask)[0]
     if len(top_idx) < 10:
-        print(f"  WARNING: Only {len(top_idx)} top-surface points — falling back to all points")
         top_idx = np.arange(len(ds))
 
-    # Exhaustive search, scored by surface flatness (higher norm Z = flatter = better grip)
+    # Exhaustive search with physics stability scoring
     scored = []
     for i, j in combinations(top_idx, 2):
         d = ds[j] - ds[i]
         dist = np.linalg.norm(d)
         if dist < 1e-9:
             continue
-        # ── Mirobot gripper width: 3–60 mm ──
+        # ── Gripper width: 3–60 mm ──
         if dist < 0.003 or dist > 0.060:
             continue
         dh = d / dist
         # ── Horizontal grasp axis: within 45° of XY plane ──
         if abs(dh[2]) > 0.7:
             continue
-        # Score: higher = flatter surface at both contacts = more stable grip
-        score = float(norms[i,2] + norms[j,2])
-        scored.append((score, ds[i], ds[j]))
 
-    # Sort by score descending, top 10 accepted, rest rejected
+        midpoint = (ds[i] + ds[j]) / 2
+        # ── 1. CoM alignment: horizontal distance from grasp midpoint to CoM ──
+        dist_to_com = np.linalg.norm(midpoint[:2] - com[:2])
+        com_score = 1.0 / (1.0 + dist_to_com / 10.0)  # 10mm tolerance — closer=better
+
+        # ── 2. Moment of inertia: resistance to rotation around grasp axis ──
+        # The flip axis is perpendicular to the grasp axis in XY plane
+        perp_x, perp_y = -dh[1], dh[0]  # perpendicular direction in XY
+        # Moment of inertia around this perpendicular axis (weighted)
+        i_flip = perp_x*perp_x*Iyy + perp_y*perp_y*Ixx
+        if i_flip > 0:
+            inertia_score = np.log1p(i_flip) / np.log1p(Izz)  # normalised — larger=more stable
+        else:
+            inertia_score = 0.5
+
+        # ── 3. Surface flatness ──
+        flat_score = float(norms[i,2] + norms[j,2])
+
+        # ── Combined physics stability score ──
+        total_score = flat_score * com_score * (1.0 + inertia_score)
+        scored.append((total_score, ds[i], ds[j]))
+
+    # Sort by score descending, top 10 accepted
     scored.sort(key=lambda x: x[0], reverse=True)
     acc = [(c1, c2) for _, c1, c2 in scored[:10]]
     rej = [(c1, c2) for _, c1, c2 in scored[10:20]]
 
-    print(f"  {len(acc)} accepted, {len(rej)} rejected (top-surface, {len(top_idx)} pts, {len(scored)} valid pairs)")
+    print(f"  {len(acc)} accepted, {len(rej)} rejected "
+          f"(CoM+inertia+flatness, {len(top_idx)} top pts, {len(scored)} valid pairs)")
 
     # ── Build JSON data for each stage ──
     pipeline_data = [

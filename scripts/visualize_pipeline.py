@@ -372,18 +372,27 @@ def run_pipeline(args):
     ns = np.linalg.norm(mn, axis=1, keepdims=True); ns[ns<1e-12]=1; mn/=ns
     rng_n = np.random.default_rng(args.seed)
     ca = np.cos(np.arctan(args.mu)); cm = ca*0.5
+    z_top = float(np.percentile(ds[:,2], 70))
     acc, rej = [], []
     for _ in range(15*200):
-        if len(acc)+len(rej)>=15: break
+        if len(acc)+len(rej)>=30: break
         i=rng_n.integers(0,len(ds)); j=rng_n.integers(0,len(ds))
         if i==j: continue
         d=ds[j]-ds[i]; dist=np.linalg.norm(d)
         if dist<1e-9: continue
         dh=d/dist; s1=float(np.dot(dh,mn[i])); s2=float(np.dot(-dh,mn[j]))
         if s1>=cm and s2>=cm:
-            (acc if s1>=ca-1e-9 and s2>=ca-1e-9 else rej).append((ds[i],ds[j]))
-    print(f"  {len(acc)} accepted, {len(rej)} rejected (antipodal)")
-    print(f"  Debug: ds shape={ds.shape}, normal mean={mn.mean(axis=0)}")
+            is_good = s1>=ca-1e-9 and s2>=ca-1e-9
+            # ── Practical: gripper width 3–50mm, axis within 60° of vertical,
+            #     at least one contact in top 30% ──
+            practical = (0.003 <= dist <= 0.050) and \
+                        (abs(dh[2]) >= np.cos(np.deg2rad(60))) and \
+                        (ds[i,2] >= z_top or ds[j,2] >= z_top)
+            if is_good and practical:
+                acc.append((ds[i],ds[j]))
+            else:
+                rej.append((ds[i],ds[j]))
+    print(f"  {len(acc)} accepted (practical top-down), {len(rej)} rejected")
 
     # ── Build JSON data for each stage ──
     pipeline_data = [

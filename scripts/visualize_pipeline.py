@@ -372,9 +372,9 @@ def run_pipeline(args):
     ns = np.linalg.norm(mn, axis=1, keepdims=True); ns[ns<1e-12]=1; mn/=ns
     rng_n = np.random.default_rng(args.seed)
     ca = np.cos(np.arctan(args.mu)); cm = ca*0.5
-    z_med = float(np.median(ds[:,2]))
+    z_top = float(np.percentile(ds[:,2], 70))  # top 30% of fragment
     acc, rej = [], []
-    for _ in range(15*400):
+    for _ in range(15*600):
         if len(acc)+len(rej)>=15: break
         i=rng_n.integers(0,len(ds)); j=rng_n.integers(0,len(ds))
         if i==j: continue
@@ -383,10 +383,10 @@ def run_pipeline(args):
         # ── Practical graspability constraints (top-down robot approach) ──
         # 1. Gripper width: 5mm–40mm (Mirobot parallel gripper range)
         if dist < 0.005 or dist > 0.040: continue
-        # 2. Both contacts must be in top half of fragment (Z > median)
-        if ds[i,2] < z_med or ds[j,2] < z_med: continue
+        # 2. At least one contact accessible from above (top 30% of fragment height)
+        if ds[i,2] < z_top and ds[j,2] < z_top: continue
         dh=d/dist
-        # 3. Grasp axis must be roughly vertical (within 40° of Z)
+        # 3. Grasp axis roughly vertical (within 50° of Z)
         if abs(dh[2]) < np.cos(np.deg2rad(50)): continue
         s1=float(np.dot(dh,mn[i])); s2=float(np.dot(-dh,mn[j]))
         if s1>=cm and s2>=cm:

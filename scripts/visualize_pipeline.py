@@ -195,21 +195,12 @@ const dl = new THREE.DirectionalLight(0xffffff, 4);
 dl.position.set(0.1,-0.2,0.15);
 scene.add(dl);
 
-// Axes — thick coloured point clouds (WebGL can't draw wide lines)
-function axisPts(from, to, colorHex, n=500, size=0.012){{ 
-    const pts=new Float32Array(n*3),cols=new Float32Array(n*3);
-    const r=colorHex>>16&255,g=colorHex>>8&255,b=colorHex&255;
-    for(let i=0;i<n;i++){{const t=i/(n-1);
-        pts[i*3]=from.x+(to.x-from.x)*t;pts[i*3+1]=from.y+(to.y-from.y)*t;pts[i*3+2]=from.z+(to.z-from.z)*t;
-        cols[i*3]=r/255;cols[i*3+1]=g/255;cols[i*3+2]=b/255;
-    }}
-    const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.BufferAttribute(pts,3));g.setAttribute('color',new THREE.BufferAttribute(cols,3));
-    scene.add(new THREE.Points(g,new THREE.PointsMaterial({{size:size,vertexColors:true,sizeAttenuation:true}})));
-}}
-const O=new THREE.Vector3(0,0,0);
-axisPts(O,new THREE.Vector3(0.08,0,0),0xff0000); // X — red
-axisPts(O,new THREE.Vector3(0,0.08,0),0x00ff00); // Y — green
-axisPts(O,new THREE.Vector3(0,0,0.08),0x0088ff); // Z — blue
+// Axes
+const ax = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0,0,0),new THREE.Vector3(0.02,0,0),
+    new THREE.Vector3(0,0,0),new THREE.Vector3(0,0.02,0),
+    new THREE.Vector3(0,0,0),new THREE.Vector3(0,0,0.02)]);
+scene.add(new THREE.LineSegments(ax, new THREE.LineBasicMaterial({{color:0xffffff}})));
 
 // Build point clouds
 const groups = [];

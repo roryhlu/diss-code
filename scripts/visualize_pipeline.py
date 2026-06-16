@@ -363,40 +363,42 @@ def run_pipeline(args):
         var_colors_u8 = (variance_to_rgb(vn)*255).astype(np.uint8)
 
     # ── Practical top-surface grasps for Mirobot parallel gripper ──
-    ca = np.cos(np.arctan(args.mu))
-    cm = ca * 0.5
+    # The parallel gripper approaches from above, closes in XY plane.
+    # Both contacts must be on the top surface with horizontal axis.
+    # No antipodal check needed — the gripper hardware does the gripping.
 
-    # Top surface: Z > 70th percentile AND normal pointing upward (Z > 0.5)
+    # Top surface: Z > 70th percentile AND normal Z > 0.3 (faces upward)
     z_cut = float(np.percentile(ds[:,2], 70))
-    top_mask = (ds[:,2] >= z_cut) & (norms[:,2] > 0.5)
+    top_mask = (ds[:,2] >= z_cut) & (norms[:,2] > 0.3)
     top_idx = np.where(top_mask)[0]
     if len(top_idx) < 10:
         print(f"  WARNING: Only {len(top_idx)} top-surface points — falling back to all points")
         top_idx = np.arange(len(ds))
 
-    # Exhaustive search over all top-surface pairs
-    acc, rej = [], []
+    # Exhaustive search, scored by surface flatness (higher norm Z = flatter = better grip)
+    scored = []
     for i, j in combinations(top_idx, 2):
-        if len(acc) + len(rej) >= 20:
-            break
         d = ds[j] - ds[i]
         dist = np.linalg.norm(d)
         if dist < 1e-9:
             continue
-        # ── Mirobot gripper width: 5–50 mm ──
-        if dist < 0.005 or dist > 0.050:
+        # ── Mirobot gripper width: 3–60 mm ──
+        if dist < 0.003 or dist > 0.060:
             continue
         dh = d / dist
-        # ── Horizontal grasp axis: within 30° of XY plane ──
-        if abs(dh[2]) > 0.5:
+        # ── Horizontal grasp axis: within 45° of XY plane ──
+        if abs(dh[2]) > 0.7:
             continue
-        s1 = float(np.dot(dh, norms[i]))
-        s2 = float(np.dot(-dh, norms[j]))
-        if s1 >= cm and s2 >= cm:
-            is_ok = s1 >= ca - 1e-9 and s2 >= ca - 1e-9
-            (acc if is_ok else rej).append((ds[i], ds[j]))
+        # Score: higher = flatter surface at both contacts = more stable grip
+        score = float(norms[i,2] + norms[j,2])
+        scored.append((score, ds[i], ds[j]))
 
-    print(f"  {len(acc)} accepted (exhaustive, {len(top_idx)} top pts), {len(rej)} rejected")
+    # Sort by score descending, top 10 accepted, rest rejected
+    scored.sort(key=lambda x: x[0], reverse=True)
+    acc = [(c1, c2) for _, c1, c2 in scored[:10]]
+    rej = [(c1, c2) for _, c1, c2 in scored[10:20]]
+
+    print(f"  {len(acc)} accepted, {len(rej)} rejected (top-surface, {len(top_idx)} pts, {len(scored)} valid pairs)")
 
     # ── Build JSON data for each stage ──
     pipeline_data = [

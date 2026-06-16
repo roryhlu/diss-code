@@ -392,15 +392,15 @@ def run_pipeline(args):
         {'name':'05_TEASER_Aligned','size':0.005,  'offset_x':0, **points_to_json(aligned, np.full((len(aligned),3),[0,230,60],np.uint8))},
         {'name':'06_GeoTransformer','size':0.005,  'offset_x':0, **points_to_json(geo_mean, np.full((len(geo_mean),3),[0,200,220],np.uint8))},
         {'name':'07_Variance',      'size':0.005,  'offset_x':0, **points_to_json(ds, var_colors_u8)},
-        {'name':'08_Grasps_Pass',   'size':0.080,  'offset_x':0, **sphere_json([c for (c,_) in acc]+[c for (_,c) in acc], [0,255,50], 0.150)},
-        {'name':'09_Grasps_Fail',   'size':0.070,  'offset_x':0, **sphere_json([c for (c,_) in rej[:6]]+[c for (_,c) in rej[:6]], [255,30,30], 0.120)},
+        {'name':'08_Grasps_Pass',   'size':0.150,  'offset_x':0, **sphere_json([c for (c,_) in acc]+[c for (_,c) in acc], [0,255,50], 0.300)},
+        {'name':'09_Grasps_Fail',   'size':0.120,  'offset_x':0, **sphere_json([c for (c,_) in rej[:6]]+[c for (_,c) in rej[:6]], [255,30,30], 0.250)},
     ]
     # Add grasp axis lines as extra entries with sphere data layered on same offset
     if acc:
-        pipeline_data.append({'name':'08b_Grasp_Axis_Pass','size':0.040,'offset_x':0,
+        pipeline_data.append({'name':'08b_Grasp_Axis_Pass','size':0.080,'offset_x':0,
             **line_json(acc, [0,200,50], 40)})
     if rej:
-        pipeline_data.append({'name':'09b_Grasp_Axis_Fail','size':0.035,'offset_x':0,
+        pipeline_data.append({'name':'09b_Grasp_Axis_Fail','size':0.070,'offset_x':0,
             **line_json(rej[:6], [200,30,30], 30)})
 
     html = build_html(pipeline_data)

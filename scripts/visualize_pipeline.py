@@ -368,7 +368,7 @@ def run_pipeline(args):
 
     # Top surface: Z > 70th percentile AND normal pointing upward (Z > 0.5)
     z_cut = float(np.percentile(ds[:,2], 70))
-    top_mask = (ds[:,2] >= z_cut) & (mn[:,2] > 0.5)
+    top_mask = (ds[:,2] >= z_cut) & (norms[:,2] > 0.5)
     top_idx = np.where(top_mask)[0]
     if len(top_idx) < 10:
         print(f"  WARNING: Only {len(top_idx)} top-surface points — falling back to all points")
@@ -394,8 +394,8 @@ def run_pipeline(args):
         # ── Horizontal grasp axis: within 30° of XY plane ──
         if abs(dh[2]) > 0.5:
             continue
-        s1 = float(np.dot(dh, mn[i]))
-        s2 = float(np.dot(-dh, mn[j]))
+        s1 = float(np.dot(dh, norms[i]))
+        s2 = float(np.dot(-dh, norms[j]))
         if s1 >= cm and s2 >= cm:
             is_ok = s1 >= ca - 1e-9 and s2 >= ca - 1e-9
             (acc if is_ok else rej).append((ds[i], ds[j]))

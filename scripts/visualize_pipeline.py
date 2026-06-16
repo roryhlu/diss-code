@@ -361,34 +361,46 @@ def run_pipeline(args):
         vn = vt.numpy()*(scl**2)
         var_colors_u8 = (variance_to_rgb(vn)*255).astype(np.uint8)
 
-    # ── CVaR grasps ──
-    from scipy.spatial import cKDTree
-    k = min(30, len(ds)); tree = cKDTree(ds); _, idx = tree.query(ds, k=k)
-    nbrs = ds[idx]; mu_n = nbrs.mean(axis=1, keepdims=True)
-    cov_n = np.einsum("nki,nkj->nij", nbrs-mu_n, nbrs-mu_n)/(k-1)
-    _, eigv = np.linalg.eigh(cov_n)
-    mn = eigv[:,:,0].copy()
-    d_in = np.sum(mn*(-ds), axis=1); mn[d_in<0]*=-1
-    ns = np.linalg.norm(mn, axis=1, keepdims=True); ns[ns<1e-12]=1; mn/=ns
+    # ── Practical top-surface grasps for Mirobot parallel gripper ──
     rng_n = np.random.default_rng(args.seed)
-    ca = np.cos(np.arctan(args.mu)); cm = ca*0.5
+    ca = np.cos(np.arctan(args.mu))
+    cm = ca * 0.5
+
+    # Top surface: Z > 70th percentile AND normal pointing upward (Z > 0.5)
+    z_cut = float(np.percentile(ds[:,2], 70))
+    top_mask = (ds[:,2] >= z_cut) & (mn[:,2] > 0.5)
+    top_idx = np.where(top_mask)[0]
+    if len(top_idx) < 10:
+        print(f"  WARNING: Only {len(top_idx)} top-surface points — falling back to all points")
+        top_idx = np.arange(len(ds))
+
+    # Search over pairs on the top surface (max 5000 attempts)
     acc, rej = [], []
-    for _ in range(15*200):
-        if len(acc)+len(rej)>=30: break
-        i=rng_n.integers(0,len(ds)); j=rng_n.integers(0,len(ds))
-        if i==j: continue
-        d=ds[j]-ds[i]; dist=np.linalg.norm(d)
-        if dist<1e-9: continue
-        dh=d/dist; s1=float(np.dot(dh,mn[i])); s2=float(np.dot(-dh,mn[j]))
-        if s1>=cm and s2>=cm:
-            is_good = s1>=ca-1e-9 and s2>=ca-1e-9
-            # Practical: axis within 80° of vertical (cos 80° ≈ 0.17)
-            practical = abs(dh[2]) >= 0.17
-            if is_good and practical:
-                acc.append((ds[i],ds[j]))
-            else:
-                rej.append((ds[i],ds[j]))
-    print(f"  {len(acc)} accepted practical, {len(rej)} rejected")
+    for _ in range(5000):
+        if len(acc) + len(rej) >= 20:
+            break
+        i = top_idx[rng_n.integers(0, len(top_idx))]
+        j = top_idx[rng_n.integers(0, len(top_idx))]
+        if i == j:
+            continue
+        d = ds[j] - ds[i]
+        dist = np.linalg.norm(d)
+        if dist < 1e-9:
+            continue
+        # ── Mirobot gripper width: 10–40 mm ──
+        if dist < 0.010 or dist > 0.040:
+            continue
+        dh = d / dist
+        # ── Horizontal grasp axis: within 30° of XY plane ──
+        if abs(dh[2]) > 0.5:
+            continue
+        s1 = float(np.dot(dh, mn[i]))
+        s2 = float(np.dot(-dh, mn[j]))
+        if s1 >= cm and s2 >= cm:
+            is_ok = s1 >= ca - 1e-9 and s2 >= ca - 1e-9
+            (acc if is_ok else rej).append((ds[i], ds[j]))
+
+    print(f"  {len(acc)} accepted (top-surface, horizontal, {len(top_idx)} top pts), {len(rej)} rejected")
 
     # ── Build JSON data for each stage ──
     pipeline_data = [

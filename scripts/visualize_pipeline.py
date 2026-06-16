@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+from itertools import combinations
 
 
 # ── SE(3) + geometry helpers ─────────────────────────────────────────
@@ -362,7 +363,6 @@ def run_pipeline(args):
         var_colors_u8 = (variance_to_rgb(vn)*255).astype(np.uint8)
 
     # ── Practical top-surface grasps for Mirobot parallel gripper ──
-    rng_n = np.random.default_rng(args.seed)
     ca = np.cos(np.arctan(args.mu))
     cm = ca * 0.5
 
@@ -374,21 +374,17 @@ def run_pipeline(args):
         print(f"  WARNING: Only {len(top_idx)} top-surface points — falling back to all points")
         top_idx = np.arange(len(ds))
 
-    # Search over pairs on the top surface (max 5000 attempts)
+    # Exhaustive search over all top-surface pairs
     acc, rej = [], []
-    for _ in range(5000):
+    for i, j in combinations(top_idx, 2):
         if len(acc) + len(rej) >= 20:
             break
-        i = top_idx[rng_n.integers(0, len(top_idx))]
-        j = top_idx[rng_n.integers(0, len(top_idx))]
-        if i == j:
-            continue
         d = ds[j] - ds[i]
         dist = np.linalg.norm(d)
         if dist < 1e-9:
             continue
-        # ── Mirobot gripper width: 10–40 mm ──
-        if dist < 0.010 or dist > 0.040:
+        # ── Mirobot gripper width: 5–50 mm ──
+        if dist < 0.005 or dist > 0.050:
             continue
         dh = d / dist
         # ── Horizontal grasp axis: within 30° of XY plane ──
@@ -400,7 +396,7 @@ def run_pipeline(args):
             is_ok = s1 >= ca - 1e-9 and s2 >= ca - 1e-9
             (acc if is_ok else rej).append((ds[i], ds[j]))
 
-    print(f"  {len(acc)} accepted (top-surface, horizontal, {len(top_idx)} top pts), {len(rej)} rejected")
+    print(f"  {len(acc)} accepted (exhaustive, {len(top_idx)} top pts), {len(rej)} rejected")
 
     # ── Build JSON data for each stage ──
     pipeline_data = [

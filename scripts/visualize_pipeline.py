@@ -343,6 +343,7 @@ def run_pipeline(args):
 
     # ── MC Dropout ──
     geo_mean = ds.copy()
+    vn = None
     var_colors_u8 = np.full((len(ds),3), [255,20,147], np.uint8)  # hot pink — clearly distinct
     if not args.quick and args.model and Path(args.model).exists():
         from uncertainty.geotransformer import GeoTransformer
@@ -439,6 +440,62 @@ def run_pipeline(args):
 
     total_score = center_score * finger_score * spacing_score
 
+    # ── 5. Epistemic uncertainty + CVaR (only when MC Dropout ran) ──
+    cvar_passed = True  # default: passes if no variance data
+    finger_var_scores = [1.0, 1.0, 1.0]  # per-finger variance penalty
+    if not args.quick and vn is not None and len(vn) > 0:
+        from scipy.spatial import cKDTree as _CVKD
+        vtree = _CVKD(ds)
+        var_max = float(vn.max())
+        if var_max > 1e-9:
+            # Look up epistemic variance at each finger contact
+            finger_vars = []
+            for fi, fpt in enumerate(fingers):
+                _, vnn = vtree.query(fpt, k=1)
+                fvar = float(vn[vnn])
+                finger_vars.append(fvar)
+                # Penalty: high variance = lower score (0.1–1.0 range)
+                finger_var_scores[fi] = max(0.1, 1.0 - fvar / var_max)
+
+            # ── CVaR: perturb finger positions, test worst 5% ──
+            N_cvar = 50
+            cvar_scores = np.zeros(N_cvar)
+            rng_cv = np.random.default_rng(args.seed + 777)
+            for k in range(N_cvar):
+                # Perturb each finger isotropically with σ_i = sqrt(variance_i)
+                p_fingers = []
+                for fi, fpt in enumerate(fingers):
+                    sigma = max(0.0, float(np.sqrt(finger_vars[fi])))
+                    noise = rng_cv.normal(0, sigma, 3)
+                    p_fingers.append(fpt + noise)
+                # Recompute finger flatness scores at perturbed positions
+                p_fs = []
+                for pf in p_fingers:
+                    _, pnn = vtree.query(pf, k=1)
+                    p_fs.append(float(norms[pnn, 2]))
+                pfinger_score = sum(p_fs) / 3.0
+                # Perturbed total score
+                cvar_scores[k] = center_score * pfinger_score * spacing_score
+                # Apply variance penalty
+                for fi in range(3):
+                    cvar_scores[k] *= finger_var_scores[fi]
+
+            # CVaR: mean of worst 5%
+            cvar_sorted = np.sort(cvar_scores)
+            k_tail = max(1, int(np.ceil(0.05 * N_cvar)))
+            cvar_val = float(cvar_sorted[:k_tail].mean())
+            cvar_passed = cvar_val > 0.1
+            print(f"  Variance at fingers: {[round(v,1) for v in finger_vars]}")
+            print(f"  Finger penalties: {[round(s,2) for s in finger_var_scores]}")
+            print(f"  CVaR: {cvar_val:.3f} → {'PASS' if cvar_passed else 'FAIL'}")
+    else:
+        print(f"  --quick mode: skipping CVaR, geometric scoring only")
+
+    # ── Visual colors: brighter = safer (CVaR passed), dimmer = failed ──
+    center_color = [0,255,80] if cvar_passed else [150,80,80]
+    finger_color = [255,200,50] if cvar_passed else [200,100,50]
+    line_color   = [200,200,200] if cvar_passed else [120,80,80]
+
     print(f"  Center score={center_score:.3f}, finger score={finger_score:.3f}, "
           f"spacing={spacing_score:.3f}, total={total_score:.3f}")
 
@@ -460,14 +517,13 @@ def run_pipeline(args):
         {'name':'06_GeoTransformer','size':0.005,  'offset_x':0, **points_to_json(geo_mean, np.full((len(geo_mean),3),[0,200,220],np.uint8))},
         {'name':'07_Variance',      'size':0.005,  'offset_x':0, **points_to_json(ds, var_colors_u8)},
         # 3-Finger Gripper: center sphere (green) + finger spheres (yellow) + lines
-        {'name':'08_Finger_Center',  'size':0.200, 'offset_x':0, **sphere_json(center_pts_list, [0,255,80], 0.500)},
-        {'name':'09_Finger_Contacts','size':0.150, 'offset_x':0, **sphere_json(finger_pts_list, [255,200,50], 0.350)},
+        {'name':'08_Finger_Center',  'size':0.200, 'offset_x':0, **sphere_json(center_pts_list, center_color, 0.500)},
+        {'name':'09_Finger_Contacts','size':0.150, 'offset_x':0, **sphere_json(finger_pts_list, finger_color, 0.350)},
         {'name':'10_Hull_Outline',   'size':0.010, 'offset_x':0, **points_to_json(np.vstack([hull_full, hull_full[0:1]]), np.full((len(hull_full)+1,3),[100,180,255],np.uint8))},
     ]
-    # Lines from center to each finger
     if lines:
         pipeline_data.append({'name':'10b_Finger_Lines','size':0.040,'offset_x':0,
-            **line_json(lines, [200,200,200], 50)})
+            **line_json(lines, line_color, 50)})
     # Hull outline as connected line
     hull_pairs = [(hull_full[k], hull_full[(k+1)%len(hull_full)]) for k in range(len(hull_full))]
     pipeline_data.append({'name':'10c_Hull_Edges','size':0.008,'offset_x':0,

@@ -410,102 +410,98 @@ def run_pipeline(args):
     hull_pts = top_xy[hull.vertices]  # (H, 2) — convex hull in XY
     hull_full = ds[top_idx][hull.vertices]  # (H, 3) — full 3D hull points
 
-    # ── 3. Three fingers equally spaced around the perimeter ──
-    # Start from the hull point closest to major inertia direction
+    # ── 3. Retry loop: try 12 start angles (30° steps), pick best CVaR ──
     hull_centered = hull_pts - com[:2]
     angles = np.arctan2(hull_centered[:,1], hull_centered[:,0])
-    # Find 3 fingers at ~120° spacing, starting from best angle
     sorted_idx = np.argsort(angles)
     n_hull = len(hull_pts)
     step = n_hull // 3
-    finger_idx = [sorted_idx[0], sorted_idx[step], sorted_idx[2*step]]
-    fingers = [hull_full[fi] for fi in finger_idx]
-
-    # ── 4. Score the grasp ──
-    # Center score: how close to CoM + how flat
     center_xy_dist = np.linalg.norm(best_center[:2] - com[:2])
     center_score = 1.0 / (1.0 + center_xy_dist / 5.0)
 
-    # Finger scores: how flat the surface is at each finger contact
-    # (use nearest point normals for the hull vertices)
-    finger_scores = []
-    for fi in finger_idx:
-        orig_idx = top_idx[hull.vertices[fi]]
-        finger_scores.append(float(norms[orig_idx,2]))
-    finger_score = sum(finger_scores) / 3.0
-
-    # Spacing score: how evenly are the fingers spaced? (variance of angles)
-    finger_angles = [angles[fi] for fi in finger_idx]
-    spacing_score = 1.0 / (1.0 + np.std(finger_angles))
-
-    total_score = center_score * finger_score * spacing_score
-
-    # ── 5. Epistemic uncertainty + CVaR (only when MC Dropout ran) ──
-    cvar_passed = True  # default: passes if no variance data
-    finger_var_scores = [1.0, 1.0, 1.0]  # per-finger variance penalty
-    if not args.quick and vn is not None and len(vn) > 0:
+    # Setup variance KDTree if available
+    vtree = None
+    var_max = 0.0
+    if not args.quick and vn is not None and len(vn) > 0 and float(vn.max()) > 1e-9:
         from scipy.spatial import cKDTree as _CVKD
         vtree = _CVKD(ds)
         var_max = float(vn.max())
-        if var_max > 1e-9:
-            # Look up epistemic variance at each finger contact
-            finger_vars = []
-            for fi, fpt in enumerate(fingers):
+
+    best_attempt = None  # (cvar_val, fingers, finger_idx, finger_vars, finger_var_scores)
+    n_attempts = 12
+    for attempt in range(n_attempts):
+        start_angle = attempt * (2 * np.pi / n_attempts)
+        # Rotate sorted indices by the start angle offset
+        offset = int(start_angle / (2 * np.pi) * n_hull) % n_hull
+        rotated_idx = sorted_idx[np.arange(n_hull) - offset]
+        fi = [rotated_idx[0], rotated_idx[step], rotated_idx[2*step]]
+        fgrs = [hull_full[fi[k]] for k in range(3)]
+        f_angles = [angles[fi[k]] for k in range(3)]
+        spacing = 1.0 / (1.0 + np.std(f_angles))
+        f_fs = [float(norms[top_idx[hull.vertices[fi[k]]], 2]) for k in range(3)]
+        f_score = sum(f_fs) / 3.0
+        geo_score = center_score * f_score * spacing
+
+        # CVaR (if variance available)
+        cvar_val = geo_score  # fallback = geometric score
+        f_vars = [0.0, 0.0, 0.0]
+        f_pen = [1.0, 1.0, 1.0]
+        if vtree is not None and var_max > 0:
+            for k, fpt in enumerate(fgrs):
                 _, vnn = vtree.query(fpt, k=1)
-                fvar = float(vn[vnn])
-                finger_vars.append(fvar)
-                # Penalty: high variance = lower score (0.1–1.0 range)
-                finger_var_scores[fi] = max(0.1, 1.0 - fvar / var_max)
+                f_vars[k] = float(vn[vnn])
+                f_pen[k] = max(0.1, 1.0 - f_vars[k] / var_max)
+            N_cv = 30
+            cv_scores = np.zeros(N_cv)
+            rng_c = np.random.default_rng(args.seed + 777 + attempt)
+            for k in range(N_cv):
+                pf = [fgrs[m] + rng_c.normal(0, max(0, np.sqrt(f_vars[m])), 3) for m in range(3)]
+                pf_fs = [float(norms[int(vtree.query(pf[m], k=1)[1]), 2]) for m in range(3)]
+                cv_scores[k] = center_score * (sum(pf_fs)/3.0) * spacing
+                for m in range(3):
+                    cv_scores[k] *= f_pen[m]
+            cv_sorted = np.sort(cv_scores)
+            kt = max(1, int(np.ceil(0.05 * N_cv)))
+            cvar_val = float(cv_sorted[:kt].mean())
 
-            # ── CVaR: perturb finger positions, test worst 5% ──
-            N_cvar = 50
-            cvar_scores = np.zeros(N_cvar)
-            rng_cv = np.random.default_rng(args.seed + 777)
-            for k in range(N_cvar):
-                # Perturb each finger isotropically with σ_i = sqrt(variance_i)
-                p_fingers = []
-                for fi, fpt in enumerate(fingers):
-                    sigma = max(0.0, float(np.sqrt(finger_vars[fi])))
-                    noise = rng_cv.normal(0, sigma, 3)
-                    p_fingers.append(fpt + noise)
-                # Recompute finger flatness scores at perturbed positions
-                p_fs = []
-                for pf in p_fingers:
-                    _, pnn = vtree.query(pf, k=1)
-                    p_fs.append(float(norms[pnn, 2]))
-                pfinger_score = sum(p_fs) / 3.0
-                # Perturbed total score
-                cvar_scores[k] = center_score * pfinger_score * spacing_score
-                # Apply variance penalty
-                for fi in range(3):
-                    cvar_scores[k] *= finger_var_scores[fi]
+        if best_attempt is None or cvar_val > best_attempt[0]:
+            best_attempt = (cvar_val, fgrs, fi, f_vars, f_pen, f_score, spacing,
+                           f_fs, f_angles)
 
-            # CVaR: mean of worst 5%
-            cvar_sorted = np.sort(cvar_scores)
-            k_tail = max(1, int(np.ceil(0.05 * N_cvar)))
-            cvar_val = float(cvar_sorted[:k_tail].mean())
-            cvar_passed = cvar_val > 0.1
-            print(f"  Variance at fingers: {[round(v,1) for v in finger_vars]}")
-            print(f"  Finger penalties: {[round(s,2) for s in finger_var_scores]}")
-            print(f"  CVaR: {cvar_val:.3f} → {'PASS' if cvar_passed else 'FAIL'}")
-    else:
-        print(f"  --quick mode: skipping CVaR, geometric scoring only")
+        if cvar_val > 0.5:
+            break  # excellent confidence — stop early
 
-    # ── Visual colors: brighter = safer (CVaR passed), dimmer = failed ──
-    center_color = [0,255,80] if cvar_passed else [150,80,80]
-    finger_color = [255,200,50] if cvar_passed else [200,100,50]
-    line_color   = [200,200,200] if cvar_passed else [120,80,80]
+    # Unpack best attempt
+    cvar_val, fingers, finger_idx, finger_vars, finger_var_scores, \
+        finger_score, spacing_score, finger_scores_list, finger_angles = best_attempt
 
-    print(f"  Center score={center_score:.3f}, finger score={finger_score:.3f}, "
-          f"spacing={spacing_score:.3f}, total={total_score:.3f}")
+    cvar_passed = cvar_val > 0.1
 
-    # For visualization: center gets a large sphere, fingers get smaller spheres
+    # ── Impedance control: CVaR confidence → stiffness / force / speed ──
+    confidence = min(1.0, max(0.0, cvar_val))
+    K_grip = confidence                           # 0→1 stiffness
+    grip_force_pct = int(confidence * 100)         # % of max force
+    approach_speed_pct = int(max(15, confidence * 100))  # min 15% speed
+
+    print(f"  Best of {n_attempts} attempts: CVaR={cvar_val:.3f} "
+          f"({'PASS' if cvar_passed else 'FAIL'})")
+    if vtree is not None:
+        print(f"  Finger variance: {[round(v,1) for v in finger_vars]}")
+    print(f"  Impedance: K={confidence:.2f}, force={grip_force_pct}%, "
+          f"speed={approach_speed_pct}%")
+
+    # ── Visual colors: brightness = confidence ──
+    brightness = min(1.0, confidence * 1.5 + 0.2)
+    center_color = [int(0*brightness), int(255*brightness), int(80*brightness)]
+    finger_color = [int(255*brightness), int(200*brightness), int(50*brightness)]
+    line_color   = [int(200*brightness), int(200*brightness), int(200*brightness)]
+
+    # For visualization
     center_pts_list = [best_center]
     finger_pts_list = [fingers[0], fingers[1], fingers[2]]
-    # Line from center to each finger
     lines = [(best_center, f) for f in fingers]
 
-    print(f"  3-finger grasp: center+{len(fingers)} fingers, {n_hull} hull vertices")
+    print(f"  3-finger grasp: {n_hull} hull pts, {n_attempts} attempts")
 
     # ── Build JSON data for each stage ──
     pipeline_data = [

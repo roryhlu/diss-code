@@ -90,6 +90,29 @@ def points_to_json(pts, cols, max_n=30000):
     }
 
 
+def cube_json(centers, color_rgb, size=0.003, n=120):
+    """Generate cube-surface point cloud data for each center."""
+    all_pts, all_col = [], []
+    half = size / 2
+    rng = np.random.default_rng(42)
+    for c in centers:
+        face_pts = []
+        n_face = n // 6
+        for axis in range(3):
+            for sign in [-1, 1]:
+                face = np.zeros((n_face, 3))
+                face[:, axis] = sign * half
+                for a in [(axis+1)%3, (axis+2)%3]:
+                    face[:, a] = rng.uniform(-half, half, n_face)
+                face_pts.append(face)
+        pts = np.vstack(face_pts) + c
+        all_pts.append(pts)
+    if not all_pts: return {'x':[0],'y':[0],'z':[0],'cr':[0],'cg':[0],'cb':[0]}
+    pts = np.vstack(all_pts)
+    cols = np.full((len(pts),3), color_rgb, np.uint8)
+    return points_to_json(pts, cols, max_n=99999)
+
+
 def sphere_json(centers, color_rgb, radius=0.006, n=300):
     """Generate sphere point cloud data for each center."""
     all_pts, all_col = [], []
@@ -429,10 +452,10 @@ def run_pipeline(args):
         var_max = float(vn.max())
 
     best_attempt = None  # (cvar_val, fingers, finger_idx, finger_vars, finger_var_scores)
+    all_attempts = []     # collect all for visualization
     n_attempts = 12
     for attempt in range(n_attempts):
         start_angle = attempt * (2 * np.pi / n_attempts)
-        # Rotate sorted indices by the start angle offset
         offset = int(start_angle / (2 * np.pi) * n_hull) % n_hull
         rotated_idx = sorted_idx[np.arange(n_hull) - offset]
         fi = [rotated_idx[0], rotated_idx[step], rotated_idx[2*step]]
@@ -443,8 +466,7 @@ def run_pipeline(args):
         f_score = sum(f_fs) / 3.0
         geo_score = center_score * f_score * spacing
 
-        # CVaR (if variance available)
-        cvar_val = geo_score  # fallback = geometric score
+        cvar_val = geo_score
         f_vars = [0.0, 0.0, 0.0]
         f_pen = [1.0, 1.0, 1.0]
         if vtree is not None and var_max > 0:
@@ -465,12 +487,18 @@ def run_pipeline(args):
             kt = max(1, int(np.ceil(0.05 * N_cv)))
             cvar_val = float(cv_sorted[:kt].mean())
 
+        all_attempts.append((cvar_val, fgrs, f_vars, f_pen, f_score, spacing,
+                             f_fs, f_angles))
+
         if best_attempt is None or cvar_val > best_attempt[0]:
             best_attempt = (cvar_val, fgrs, fi, f_vars, f_pen, f_score, spacing,
                            f_fs, f_angles)
 
         if cvar_val > 0.5:
-            break  # excellent confidence — stop early
+            break
+
+    # Sort all attempts by CVaR descending
+    all_attempts.sort(key=lambda x: x[0], reverse=True)
 
     # Unpack best attempt
     cvar_val, fingers, finger_idx, finger_vars, finger_var_scores, \
@@ -523,6 +551,34 @@ def run_pipeline(args):
         {'name':'09_Finger_Contacts','size':0.150, 'offset_x':0, **sphere_json(finger_pts_list, finger_color, 0.350)},
         {'name':'10_Hull_Outline',   'size':0.010, 'offset_x':0, **points_to_json(np.vstack([hull_full, hull_full[0:1]]), np.full((len(hull_full)+1,3),[100,180,255],np.uint8))},
     ]
+    # ── Unchosen attempts: cubes with same confidence gradient ──
+    if len(all_attempts) > 1:
+        unchosen_cubes_center = []
+        unchosen_cubes_fingers = []
+        for idx, (cv, fgrs, fv, fp, fs, sp, ffs, fa) in enumerate(all_attempts[1:], 1):
+            conf = min(1.0, max(0.0, cv))
+            # Same color gradient as chosen
+            if conf < 0.5:
+                ccol = [255, int(255*conf*2), 0]
+                fcol = [255, int(50+410*conf), int(50*conf)]
+            else:
+                ccol = [int(255*(1-conf)*2), 255, 0]
+                fcol = [int(255*(1-conf)*2+50), 255, int(100*conf)]
+            unchosen_cubes_center.append(best_center)
+            unchosen_cubes_fingers.extend(fgrs)
+            # Add per-attempt entry with its own color
+            pipeline_data.append(
+                {'name':f'11_Cube_Center_{idx}', 'size':0.080, 'offset_x':0,
+                 **cube_json([best_center], ccol, 0.006)})
+            pipeline_data.append(
+                {'name':f'11b_Cube_Fingers_{idx}', 'size':0.050, 'offset_x':0,
+                 **cube_json([fgrs[0], fgrs[1], fgrs[2]], fcol, 0.004)})
+            # Dim lines from center to fingers
+            pipeline_data.append(
+                {'name':f'11c_Cube_Lines_{idx}', 'size':0.015, 'offset_x':0,
+                 **line_json([(best_center, fgrs[k]) for k in range(3)],
+                            [int(100+100*conf)]*3, 20)})
+    # ── Chosen: spheres + lines ──
     if lines:
         pipeline_data.append({'name':'10b_Finger_Lines','size':0.040,'offset_x':0,
             **line_json(lines, line_color, 50)})

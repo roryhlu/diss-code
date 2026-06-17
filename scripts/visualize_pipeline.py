@@ -574,10 +574,11 @@ def run_pipeline(args):
                 {'name':f'11b_Cube_Fingers_{idx}', 'size':0.050, 'offset_x':0,
                  **cube_json([fgrs[0], fgrs[1], fgrs[2]], fcol, 0.004)})
             # Dim lines from center to fingers
+            lc = int(80 + 150 * conf)
             pipeline_data.append(
-                {'name':f'11c_Cube_Lines_{idx}', 'size':0.015, 'offset_x':0,
+                {'name':f'11c_Cube_Lines_{idx}', 'size':0.030, 'offset_x':0,
                  **line_json([(best_center, fgrs[k]) for k in range(3)],
-                            [int(100+100*conf)]*3, 20)})
+                            [lc, lc, lc], 40)})
     # ── Chosen: spheres + lines ──
     if lines:
         pipeline_data.append({'name':'10b_Finger_Lines','size':0.040,'offset_x':0,

@@ -168,7 +168,7 @@ import * as THREE from 'three';
 import {{OrbitControls}} from 'OrbitControls';
 
 const STAGES = {stages_json};
-const SPACING = 0.06;
+const SPACING = 6;
 let mode = 'overlay'; // 'overlay' | 'side'
 
 // Scene
@@ -404,11 +404,12 @@ def run_pipeline(args):
             best_center = pt.copy()
     print(f"  Center: [{best_center[0]:.1f},{best_center[1]:.1f},{best_center[2]:.1f}]mm")
 
-    # ── 2. Fragment perimeter (convex hull in XY from top view) ──
+    # ── 2. Fragment perimeter (convex hull from ALL points in XY) ──
     from scipy.spatial import ConvexHull
-    hull = ConvexHull(top_xy)
-    hull_pts = top_xy[hull.vertices]  # (H, 2) — convex hull in XY
-    hull_full = ds[top_idx][hull.vertices]  # (H, 3) — full 3D hull points
+    all_xy = ds[:, :2]  # full fragment projected to XY — complete outline
+    hull = ConvexHull(all_xy)
+    hull_pts = all_xy[hull.vertices]
+    hull_full = ds[hull.vertices]
 
     # ── 3. Retry loop: try 12 start angles (30° steps), pick best CVaR ──
     hull_centered = hull_pts - com[:2]
@@ -438,7 +439,7 @@ def run_pipeline(args):
         fgrs = [hull_full[fi[k]] for k in range(3)]
         f_angles = [angles[fi[k]] for k in range(3)]
         spacing = 1.0 / (1.0 + np.std(f_angles))
-        f_fs = [float(norms[top_idx[hull.vertices[fi[k]]], 2]) for k in range(3)]
+        f_fs = [float(norms[hull.vertices[fi[k]], 2]) for k in range(3)]
         f_score = sum(f_fs) / 3.0
         geo_score = center_score * f_score * spacing
 
@@ -490,11 +491,16 @@ def run_pipeline(args):
     print(f"  Impedance: K={confidence:.2f}, force={grip_force_pct}%, "
           f"speed={approach_speed_pct}%")
 
-    # ── Visual colors: brightness = confidence ──
+    # ── Visual colors: continuous gradient (red→yellow→green based on confidence) ──
     brightness = min(1.0, confidence * 1.5 + 0.2)
-    center_color = [int(0*brightness), int(255*brightness), int(80*brightness)]
-    finger_color = [int(255*brightness), int(200*brightness), int(50*brightness)]
-    line_color   = [int(200*brightness), int(200*brightness), int(200*brightness)]
+    # Center: red (0.0) → yellow (0.5) → green (1.0)
+    if confidence < 0.5:
+        center_color = [255, int(255*confidence*2), 0]
+        finger_color = [255, int(50+410*confidence), int(50*confidence)]
+    else:
+        center_color = [int(255*(1-confidence)*2), 255, 0]
+        finger_color = [int(255*(1-confidence)*2+50), 255, int(100*confidence)]
+    line_color = [int(200*brightness), int(200*brightness), int(200*brightness)]
 
     # For visualization
     center_pts_list = [best_center]

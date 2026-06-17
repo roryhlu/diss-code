@@ -551,34 +551,48 @@ def run_pipeline(args):
         {'name':'09_Finger_Contacts','size':0.150, 'offset_x':0, **sphere_json(finger_pts_list, finger_color, 0.350)},
         {'name':'10_Hull_Outline',   'size':0.010, 'offset_x':0, **points_to_json(np.vstack([hull_full, hull_full[0:1]]), np.full((len(hull_full)+1,3),[100,180,255],np.uint8))},
     ]
-    # ── Unchosen attempts: cubes with same confidence gradient ──
+    # ── Unchosen attempts: all merged into 3 checkbox entries (big cubes + lines) ──
     if len(all_attempts) > 1:
-        unchosen_cubes_center = []
-        unchosen_cubes_fingers = []
+        all_cube_centers = []
+        all_cube_fingers = []
+        all_cube_lines = []
         for idx, (cv, fgrs, fv, fp, fs, sp, ffs, fa) in enumerate(all_attempts[1:], 1):
             conf = min(1.0, max(0.0, cv))
-            # Same color gradient as chosen
             if conf < 0.5:
                 ccol = [255, int(255*conf*2), 0]
                 fcol = [255, int(50+410*conf), int(50*conf)]
             else:
                 ccol = [int(255*(1-conf)*2), 255, 0]
                 fcol = [int(255*(1-conf)*2+50), 255, int(100*conf)]
-            unchosen_cubes_center.append(best_center)
-            unchosen_cubes_fingers.extend(fgrs)
-            # Add per-attempt entry with its own color
-            pipeline_data.append(
-                {'name':f'11_Cube_Center_{idx}', 'size':0.080, 'offset_x':0,
-                 **cube_json([best_center], ccol, 0.006)})
-            pipeline_data.append(
-                {'name':f'11b_Cube_Fingers_{idx}', 'size':0.050, 'offset_x':0,
-                 **cube_json([fgrs[0], fgrs[1], fgrs[2]], fcol, 0.004)})
-            # Dim lines from center to fingers
+            # Merge center cubes
+            all_cube_centers.append(
+                cube_json([best_center], ccol, 0.020))
+            # Merge finger cubes
+            all_cube_fingers.append(
+                cube_json([fgrs[0], fgrs[1], fgrs[2]], fcol, 0.012))
+            # Merge lines
             lc = int(80 + 150 * conf)
-            pipeline_data.append(
-                {'name':f'11c_Cube_Lines_{idx}', 'size':0.030, 'offset_x':0,
-                 **line_json([(best_center, fgrs[k]) for k in range(3)],
-                            [lc, lc, lc], 40)})
+            all_cube_lines.append(
+                line_json([(best_center, fgrs[k]) for k in range(3)],
+                         [lc, lc, lc], 40))
+
+        # Flatten to single entries
+        def _merge_json(entries, field):
+            merged = {'x':[],'y':[],'z':[],'cr':[],'cg':[],'cb':[]}
+            for e in entries:
+                for k in merged:
+                    merged[k].extend(e[k])
+            return merged
+
+        pipeline_data.append(
+            {'name':'11_All_Attempts_Centers','size':0.200,'offset_x':0,
+             **_merge_json(all_cube_centers, 'center')})
+        pipeline_data.append(
+            {'name':'11b_All_Attempts_Fingers','size':0.120,'offset_x':0,
+             **_merge_json(all_cube_fingers, 'fingers')})
+        pipeline_data.append(
+            {'name':'11c_All_Attempts_Lines','size':0.050,'offset_x':0,
+             **_merge_json(all_cube_lines, 'lines')})
     # ── Chosen: spheres + lines ──
     if lines:
         pipeline_data.append({'name':'10b_Finger_Lines','size':0.040,'offset_x':0,

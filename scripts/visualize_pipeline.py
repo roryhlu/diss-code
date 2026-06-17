@@ -362,79 +362,93 @@ def run_pipeline(args):
         vn = vt.numpy()*(scl**2)
         var_colors_u8 = (variance_to_rgb(vn)*255).astype(np.uint8)
 
-    # ── Practical top-surface grasps for Mirobot parallel gripper ──
-    # Physics-based scoring: CoM alignment + moment of inertia + surface flatness.
-    # The parallel gripper approaches from above, closes in XY plane.
+    # ── 3-Finger Soft Gripper for Wlkata Mirobot ──
+    # One center point above CoM + three fingers around fragment perimeter
+    # Physics: CoM alignment + surface flatness + perimeter coverage
 
-    # Center of Mass (CoM) — uniform density estimate from point cloud
+    # Center of Mass
     com = ds.mean(axis=0)
 
-    # Moment of Inertia tensor (3×3) — resistance to rotation around each axis
-    # Point cloud assumed uniform density, centred at CoM
-    pts_c = ds - com  # centre at CoM
+    # Moment of Inertia tensor
+    pts_c = ds - com
     x, y, z = pts_c[:,0], pts_c[:,1], pts_c[:,2]
     N = len(ds)
     Ixx = np.sum(y*y + z*z) / N
     Iyy = np.sum(x*x + z*z) / N
-    Izz = np.sum(x*x + y*y) / N  # spinning like a coin — largest for flat fragments
-    Ixy = -np.sum(x*y) / N
-    Ixz = -np.sum(x*z) / N
-    Iyz = -np.sum(y*z) / N
+    Izz = np.sum(x*x + y*y) / N
 
-    print(f"  CoM: [{com[0]:.1f}, {com[1]:.1f}, {com[2]:.1f}]mm")
+    print(f"  CoM: [{com[0]:.1f},{com[1]:.1f},{com[2]:.1f}]mm")
     print(f"  Inertia: Ixx={Ixx:.0f} Iyy={Iyy:.0f} Izz={Izz:.0f} mm²")
 
-    # Top surface: Z > 70th percentile AND normal Z > 0.3 (faces upward)
+    # Top surface
     z_cut = float(np.percentile(ds[:,2], 70))
-    top_mask = (ds[:,2] >= z_cut) & (norms[:,2] > 0.3)
+    top_mask = (ds[:,2] >= z_cut) & (norms[:,2] > 0.2)
     top_idx = np.where(top_mask)[0]
     if len(top_idx) < 10:
         top_idx = np.arange(len(ds))
+    top_pts = ds[top_idx]
+    top_xy = top_pts[:, :2]
 
-    # Exhaustive search with physics stability scoring
-    scored = []
-    for i, j in combinations(top_idx, 2):
-        d = ds[j] - ds[i]
-        dist = np.linalg.norm(d)
-        if dist < 1e-9:
-            continue
-        # ── Gripper width: 3–60 mm ──
-        if dist < 0.003 or dist > 0.060:
-            continue
-        dh = d / dist
-        # ── Horizontal grasp axis: within 45° of XY plane ──
-        if abs(dh[2]) > 0.7:
-            continue
+    # ── 1. Best center point (closest to CoM in XY, flattest surface) ──
+    best_center = None
+    best_cscore = -1.0
+    for i, idx in enumerate(top_idx):
+        pt = top_pts[i]
+        xy_dist = np.linalg.norm(pt[:2] - com[:2])
+        com_score = 1.0 / (1.0 + xy_dist / 5.0)
+        flat_score = float(norms[idx,2])
+        total = com_score * flat_score
+        if total > best_cscore:
+            best_cscore = total
+            best_center = pt.copy()
+    print(f"  Center: [{best_center[0]:.1f},{best_center[1]:.1f},{best_center[2]:.1f}]mm")
 
-        midpoint = (ds[i] + ds[j]) / 2
-        # ── 1. CoM alignment: horizontal distance from grasp midpoint to CoM ──
-        dist_to_com = np.linalg.norm(midpoint[:2] - com[:2])
-        com_score = 1.0 / (1.0 + dist_to_com / 10.0)  # 10mm tolerance — closer=better
+    # ── 2. Fragment perimeter (convex hull in XY from top view) ──
+    from scipy.spatial import ConvexHull
+    hull = ConvexHull(top_xy)
+    hull_pts = top_xy[hull.vertices]  # (H, 2) — convex hull in XY
+    hull_full = ds[top_idx][hull.vertices]  # (H, 3) — full 3D hull points
 
-        # ── 2. Moment of inertia: resistance to rotation around grasp axis ──
-        # The flip axis is perpendicular to the grasp axis in XY plane
-        perp_x, perp_y = -dh[1], dh[0]  # perpendicular direction in XY
-        # Moment of inertia around this perpendicular axis (weighted)
-        i_flip = perp_x*perp_x*Iyy + perp_y*perp_y*Ixx
-        if i_flip > 0:
-            inertia_score = np.log1p(i_flip) / np.log1p(Izz)  # normalised — larger=more stable
-        else:
-            inertia_score = 0.5
+    # ── 3. Three fingers equally spaced around the perimeter ──
+    # Start from the hull point closest to major inertia direction
+    hull_centered = hull_pts - com[:2]
+    angles = np.arctan2(hull_centered[:,1], hull_centered[:,0])
+    # Find 3 fingers at ~120° spacing, starting from best angle
+    sorted_idx = np.argsort(angles)
+    n_hull = len(hull_pts)
+    step = n_hull // 3
+    finger_idx = [sorted_idx[0], sorted_idx[step], sorted_idx[2*step]]
+    fingers = [hull_full[fi] for fi in finger_idx]
 
-        # ── 3. Surface flatness ──
-        flat_score = float(norms[i,2] + norms[j,2])
+    # ── 4. Score the grasp ──
+    # Center score: how close to CoM + how flat
+    center_xy_dist = np.linalg.norm(best_center[:2] - com[:2])
+    center_score = 1.0 / (1.0 + center_xy_dist / 5.0)
 
-        # ── Combined physics stability score ──
-        total_score = flat_score * com_score * (1.0 + inertia_score)
-        scored.append((total_score, ds[i], ds[j]))
+    # Finger scores: how flat the surface is at each finger contact
+    # (use nearest point normals for the hull vertices)
+    finger_scores = []
+    for fi in finger_idx:
+        orig_idx = top_idx[hull.vertices[fi]]
+        finger_scores.append(float(norms[orig_idx,2]))
+    finger_score = sum(finger_scores) / 3.0
 
-    # Sort by score descending, top 10 accepted
-    scored.sort(key=lambda x: x[0], reverse=True)
-    acc = [(c1, c2) for _, c1, c2 in scored[:10]]
-    rej = [(c1, c2) for _, c1, c2 in scored[10:20]]
+    # Spacing score: how evenly are the fingers spaced? (variance of angles)
+    finger_angles = [angles[fi] for fi in finger_idx]
+    spacing_score = 1.0 / (1.0 + np.std(finger_angles))
 
-    print(f"  {len(acc)} accepted, {len(rej)} rejected "
-          f"(CoM+inertia+flatness, {len(top_idx)} top pts, {len(scored)} valid pairs)")
+    total_score = center_score * finger_score * spacing_score
+
+    print(f"  Center score={center_score:.3f}, finger score={finger_score:.3f}, "
+          f"spacing={spacing_score:.3f}, total={total_score:.3f}")
+
+    # For visualization: center gets a large sphere, fingers get smaller spheres
+    center_pts_list = [best_center]
+    finger_pts_list = [fingers[0], fingers[1], fingers[2]]
+    # Line from center to each finger
+    lines = [(best_center, f) for f in fingers]
+
+    print(f"  3-finger grasp: center+{len(fingers)} fingers, {n_hull} hull vertices")
 
     # ── Build JSON data for each stage ──
     pipeline_data = [
@@ -445,16 +459,19 @@ def run_pipeline(args):
         {'name':'05_TEASER_Aligned','size':0.005,  'offset_x':0, **points_to_json(aligned, np.full((len(aligned),3),[0,230,60],np.uint8))},
         {'name':'06_GeoTransformer','size':0.005,  'offset_x':0, **points_to_json(geo_mean, np.full((len(geo_mean),3),[0,200,220],np.uint8))},
         {'name':'07_Variance',      'size':0.005,  'offset_x':0, **points_to_json(ds, var_colors_u8)},
-        {'name':'08_Grasps_Pass',   'size':0.150,  'offset_x':0, **sphere_json([c for (c,_) in acc]+[c for (_,c) in acc], [0,255,50], 0.300)},
-        {'name':'09_Grasps_Fail',   'size':0.120,  'offset_x':0, **sphere_json([c for (c,_) in rej[:6]]+[c for (_,c) in rej[:6]], [255,30,30], 0.250)},
+        # 3-Finger Gripper: center sphere (green) + finger spheres (yellow) + lines
+        {'name':'08_Finger_Center',  'size':0.200, 'offset_x':0, **sphere_json(center_pts_list, [0,255,80], 0.500)},
+        {'name':'09_Finger_Contacts','size':0.150, 'offset_x':0, **sphere_json(finger_pts_list, [255,200,50], 0.350)},
+        {'name':'10_Hull_Outline',   'size':0.010, 'offset_x':0, **points_to_json(np.vstack([hull_full, hull_full[0:1]]), np.full((len(hull_full)+1,3),[100,180,255],np.uint8))},
     ]
-    # Add grasp axis lines as extra entries with sphere data layered on same offset
-    if acc:
-        pipeline_data.append({'name':'08b_Grasp_Axis_Pass','size':0.080,'offset_x':0,
-            **line_json(acc, [0,200,50], 40)})
-    if rej:
-        pipeline_data.append({'name':'09b_Grasp_Axis_Fail','size':0.070,'offset_x':0,
-            **line_json(rej[:6], [200,30,30], 30)})
+    # Lines from center to each finger
+    if lines:
+        pipeline_data.append({'name':'10b_Finger_Lines','size':0.040,'offset_x':0,
+            **line_json(lines, [200,200,200], 50)})
+    # Hull outline as connected line
+    hull_pairs = [(hull_full[k], hull_full[(k+1)%len(hull_full)]) for k in range(len(hull_full))]
+    pipeline_data.append({'name':'10c_Hull_Edges','size':0.008,'offset_x':0,
+        **line_json(hull_pairs, [100,180,255], 20)})
 
     html = build_html(pipeline_data)
     output.write_text(html, encoding="utf-8")
